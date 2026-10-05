@@ -1,4 +1,5 @@
 mod checkpoint;
+pub mod model;
 pub mod normalization;
 pub mod sampler;
 pub mod unimate;
