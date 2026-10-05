@@ -7,8 +7,8 @@ use burn::{
     module::{Module, Param},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig},
     tensor::{
-        DType, Tensor,
-        activation::{silu, softmax},
+        DType, Tensor, TensorData,
+        activation::{gelu, silu, softmax},
         backend::Backend,
     },
 };
@@ -101,13 +101,14 @@ pub struct SpatialGraphSelfAttention<B: Backend> {
     pub proj: Linear<B>,
     pub q_norm: LlamaRmsNorm<B>,
     pub k_norm: LlamaRmsNorm<B>,
+    pub rope: SpectralJointRoPE<B>,
     heads: usize,
     head_dim: usize,
     scale: f64,
 }
 
 impl<B: Backend> SpatialGraphSelfAttention<B> {
-    pub fn new(width: usize, heads: usize, device: &B::Device) -> Self {
+    pub fn new(width: usize, heads: usize, max_freqs: usize, device: &B::Device) -> Self {
         assert!(heads > 0 && width % heads == 0);
         let head_dim = width / heads;
         Self {
@@ -115,6 +116,7 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
             proj: LinearConfig::new(width, width).init(device),
             q_norm: LlamaRmsNorm::new(head_dim, device),
             k_norm: LlamaRmsNorm::new(head_dim, device),
+            rope: SpectralJointRoPE::new(head_dim, max_freqs, device),
             heads,
             head_dim,
             scale: (head_dim as f64).powf(-0.5),
@@ -122,7 +124,12 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
     }
 
     /// `input`: `(B,F,J,D)`, `graph_bias`: `(B,H,J,J)`.
-    pub fn forward(&self, input: Tensor<B, 4>, graph_bias: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(
+        &self,
+        input: Tensor<B, 4>,
+        graph_bias: Tensor<B, 4>,
+        spectral_coords: Tensor<B, 3>,
+    ) -> Tensor<B, 4> {
         let [batch, frames, joints, width] = input.dims();
         let qkv = self.qkv.forward(input).chunk(3, 3);
         let to_heads = |tensor: Tensor<B, 4>| {
@@ -133,6 +140,7 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
         let query = self.q_norm.forward(to_heads(qkv[0].clone()));
         let key = self.k_norm.forward(to_heads(qkv[1].clone()));
         let value = to_heads(qkv[2].clone());
+        let (query, key) = self.rope.forward_per_frame(query, key, spectral_coords);
 
         let weights =
             (query.matmul(key.swap_dims(3, 4)) * self.scale) + graph_bias.unsqueeze_dim::<5>(1);
@@ -189,5 +197,151 @@ impl<B: Backend> GraphAttnBias<B> {
             .reshape([batch, 1, joints])
             .unsqueeze_dim::<4>(1);
         bias.mask_fill(key_mask.bool_not(), f32::NEG_INFINITY)
+    }
+}
+
+/// Sign invariant spectral projection used by the released checkpoint.
+#[derive(Module, Debug)]
+pub struct SignNetSpectralEncoder<B: Backend> {
+    pub phi_0: Linear<B>,
+    pub phi_2: Linear<B>,
+    pub rho_0: Linear<B>,
+    pub rho_2: Linear<B>,
+    hidden_dim: usize,
+    num_eigvecs: usize,
+}
+
+impl<B: Backend> SignNetSpectralEncoder<B> {
+    pub fn new(num_eigvecs: usize, hidden_dim: usize, out_dim: usize, device: &B::Device) -> Self {
+        Self {
+            phi_0: LinearConfig::new(1, hidden_dim).init(device),
+            phi_2: LinearConfig::new(hidden_dim, hidden_dim).init(device),
+            rho_0: LinearConfig::new(num_eigvecs * hidden_dim, hidden_dim).init(device),
+            rho_2: LinearConfig::new(hidden_dim, out_dim).init(device),
+            hidden_dim,
+            num_eigvecs,
+        }
+    }
+
+    /// Maps `(B,J,K)` Laplacian eigenvectors to `(B,J,out_dim)` angles.
+    pub fn forward(&self, spectral_coords: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, joints, eigvecs] = spectral_coords.dims();
+        assert_eq!(eigvecs, self.num_eigvecs, "spectral feature count mismatch");
+        let values = spectral_coords.unsqueeze_dim::<4>(3);
+        let phi = |x| {
+            let hidden = gelu(self.phi_0.forward(x));
+            self.phi_2.forward(hidden)
+        };
+        let encoded = phi(values.clone()) + phi(-values);
+        let encoded = encoded.reshape([batch, joints, eigvecs * self.hidden_dim]);
+        let hidden = gelu(self.rho_0.forward(encoded));
+        self.rho_2.forward(hidden)
+    }
+}
+
+/// Spectral joint RoPE, evaluated once per sample and broadcast across frames.
+#[derive(Module, Debug)]
+pub struct SpectralJointRoPE<B: Backend> {
+    pub spectral_encoder: SignNetSpectralEncoder<B>,
+    head_dim: usize,
+}
+
+/// One-axis sinusoidal RoPE used by UniMate's temporal attention.
+#[derive(Debug, Clone)]
+pub struct TemporalRoPE {
+    max_len: usize,
+    head_dim: usize,
+    base: f64,
+}
+
+impl TemporalRoPE {
+    pub fn new(max_len: usize, head_dim: usize) -> Self {
+        assert_eq!(head_dim % 2, 0, "temporal RoPE requires an even head width");
+        // Matches RopeND's auto_base rule with one position axis.
+        let base = ((8.0 * max_len as f64 / std::f64::consts::PI) as usize / 100 + 1) * 100;
+        Self {
+            max_len,
+            head_dim,
+            base: base as f64,
+        }
+    }
+
+    /// Rotates q/k shaped `(batch, heads, sequence, head_dim)`.
+    /// Frequency tables are built from the same deterministic scalar formula
+    /// as upstream RopeND and materialized on the selected Burn device.
+    pub fn forward<B: Backend>(
+        &self,
+        query: Tensor<B, 4>,
+        key: Tensor<B, 4>,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [_, _, sequence, head_dim] = query.dims();
+        assert_eq!(head_dim, self.head_dim, "temporal RoPE head width mismatch");
+        assert!(
+            sequence <= self.max_len,
+            "sequence exceeds configured temporal RoPE length"
+        );
+        let device = query.device();
+        let half = head_dim / 2;
+        let mut cos_values = Vec::with_capacity(sequence * head_dim);
+        let mut sin_values = Vec::with_capacity(sequence * head_dim);
+        for position in 0..sequence {
+            let mut angles = Vec::with_capacity(half);
+            for index in 0..half {
+                let inverse_frequency = self.base.powf(-(index as f64) / head_dim as f64);
+                angles.push(position as f64 * inverse_frequency);
+            }
+            for angle in angles.iter().chain(angles.iter()) {
+                cos_values.push(angle.cos() as f32);
+                sin_values.push(angle.sin() as f32);
+            }
+        }
+        let cos =
+            Tensor::<B, 2>::from_data(TensorData::new(cos_values, [sequence, head_dim]), &device)
+                .reshape([1, 1, sequence, head_dim]);
+        let sin =
+            Tensor::<B, 2>::from_data(TensorData::new(sin_values, [sequence, head_dim]), &device)
+                .reshape([1, 1, sequence, head_dim]);
+        let dtype = query.dtype();
+        let rotate = |x: Tensor<B, 4>| {
+            let x = x.cast(DType::F32);
+            let halves = x.clone().chunk(2, 3);
+            let rotated = Tensor::cat(vec![-halves[1].clone(), halves[0].clone()], 3);
+            (x * cos.clone() + rotated * sin.clone()).cast(dtype)
+        };
+        (rotate(query), rotate(key))
+    }
+}
+
+impl<B: Backend> SpectralJointRoPE<B> {
+    pub fn new(head_dim: usize, max_freqs: usize, device: &B::Device) -> Self {
+        assert_eq!(head_dim % 2, 0, "spectral RoPE requires an even head width");
+        Self {
+            spectral_encoder: SignNetSpectralEncoder::new(max_freqs, 64, head_dim / 2, device),
+            head_dim,
+        }
+    }
+
+    /// Applies spectral rotations to `(B,F,H,J,D)` query and key tensors.
+    pub fn forward_per_frame(
+        &self,
+        query: Tensor<B, 5>,
+        key: Tensor<B, 5>,
+        spectral_coords: Tensor<B, 3>,
+    ) -> (Tensor<B, 5>, Tensor<B, 5>) {
+        let [batch, _, _, joints, head_dim] = query.dims();
+        assert_eq!(head_dim, self.head_dim, "attention head width mismatch");
+        let dtype = query.dtype();
+        let angles = self.spectral_encoder.forward(spectral_coords);
+        let angles =
+            Tensor::cat(vec![angles.clone(), angles], 2).reshape([batch, 1, 1, joints, head_dim]);
+        let cos = angles.clone().cos();
+        let sin = angles.sin();
+        let rotate = |x: Tensor<B, 5>| {
+            let x = x.cast(DType::F32);
+            let halves = x.clone().chunk(2, 4);
+            let rotated = Tensor::cat(vec![-halves[1].clone(), halves[0].clone()], 4);
+            (x * cos.clone() + rotated * sin.clone()).cast(dtype)
+        };
+        (rotate(query), rotate(key))
     }
 }
