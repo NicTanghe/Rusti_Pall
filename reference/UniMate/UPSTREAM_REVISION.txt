@@ -1,0 +1,6 @@
+Repository: https://github.com/Friedrich-M/UniMate
+Commit: 7974f460665b4c2a1a785679531a9201f6db504e
+Archived from the upstream main branch on 2026-10-05.
+
+This is a source reference for the Rust port. The Python files are not used by
+the Rust runtime. The upstream repository's MIT license is in LICENSE.
