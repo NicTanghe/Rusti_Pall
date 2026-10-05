@@ -62,6 +62,148 @@ impl<B: Backend> SwiGLUFFN<B> {
     }
 }
 
+/// Two-linear SiLU MLP used by UniMate's sequential embedders.
+#[derive(Module, Debug)]
+pub struct SiluMlp<B: Backend> {
+    pub linear_0: Linear<B>,
+    pub linear_2: Linear<B>,
+}
+
+impl<B: Backend> SiluMlp<B> {
+    pub fn new(input: usize, hidden: usize, output: usize, device: &B::Device) -> Self {
+        Self {
+            linear_0: LinearConfig::new(input, hidden).init(device),
+            linear_2: LinearConfig::new(hidden, output).init(device),
+        }
+    }
+
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
+        self.linear_2.forward(silu(self.linear_0.forward(input)))
+    }
+}
+
+/// Sinusoidal flow-time embedding followed by UniMate's learned MLP.
+#[derive(Module, Debug)]
+pub struct TimestepEmbedder<B: Backend> {
+    pub mlp_0: Linear<B>,
+    pub mlp_2: Linear<B>,
+    hidden_size: usize,
+    frequency_size: usize,
+}
+
+impl<B: Backend> TimestepEmbedder<B> {
+    pub fn new(hidden_size: usize, device: &B::Device) -> Self {
+        let frequency_size = 256;
+        Self {
+            mlp_0: LinearConfig::new(frequency_size, hidden_size).init(device),
+            mlp_2: LinearConfig::new(hidden_size, hidden_size).init(device),
+            hidden_size,
+            frequency_size,
+        }
+    }
+
+    /// `timesteps` is `(B,)`; output is `(B, hidden_size)`.
+    pub fn forward(&self, timesteps: Tensor<B, 1>) -> Tensor<B, 2> {
+        let half = self.frequency_size / 2;
+        let frequencies: Vec<f32> = (0..half)
+            .map(|index| (-10000.0_f64.ln() * index as f64 / half as f64).exp() as f32)
+            .collect();
+        let frequency =
+            Tensor::<B, 1>::from_data(TensorData::new(frequencies, [half]), &timesteps.device())
+                .reshape([1, half]);
+        let args = timesteps.unsqueeze_dim::<2>(1) * frequency;
+        let embedding = Tensor::cat(vec![args.clone().cos(), args.sin()], 1);
+        let hidden = silu(self.mlp_0.forward(embedding));
+        let output = self.mlp_2.forward(hidden);
+        debug_assert_eq!(output.dims()[1], self.hidden_size);
+        output
+    }
+}
+
+/// Root/joint-separated motion and first-pose encoder.
+#[derive(Module, Debug)]
+pub struct InputLayer<B: Backend> {
+    pub root_tpos_embedder: SiluMlp<B>,
+    pub root_x_embedder: SiluMlp<B>,
+    pub joint_tpos_embedder: SiluMlp<B>,
+    pub parent_tpos_embedder: SiluMlp<B>,
+    pub tpos_fuse: SiluMlp<B>,
+    pub joint_x_embedder: SiluMlp<B>,
+    max_joints: usize,
+    feature_len: usize,
+    latent_dim: usize,
+}
+
+impl<B: Backend> InputLayer<B> {
+    pub fn new(
+        feature_len: usize,
+        latent_dim: usize,
+        max_joints: usize,
+        device: &B::Device,
+    ) -> Self {
+        Self {
+            root_tpos_embedder: SiluMlp::new(feature_len, latent_dim, latent_dim, device),
+            root_x_embedder: SiluMlp::new(feature_len, latent_dim, latent_dim, device),
+            joint_tpos_embedder: SiluMlp::new(feature_len, latent_dim, latent_dim, device),
+            parent_tpos_embedder: SiluMlp::new(feature_len, latent_dim, latent_dim, device),
+            tpos_fuse: SiluMlp::new(latent_dim * 2, latent_dim, latent_dim, device),
+            joint_x_embedder: SiluMlp::new(feature_len, latent_dim, latent_dim, device),
+            max_joints,
+            feature_len,
+            latent_dim,
+        }
+    }
+
+    /// Encodes motion `[B,J,features,F]`, t-pose `[B,J,features]`, parent
+    /// t-pose features, and joint counts. Returns embedded tokens `[B,F+1,J,D]`,
+    /// pooled-source t-pose tokens `[B,J,D]`, and the valid-joint mask `[B,J]`.
+    pub fn forward(
+        &self,
+        motion: Tensor<B, 4>,
+        tpos_first_frame: Tensor<B, 3>,
+        tpos_first_frame_parents: Tensor<B, 3>,
+        n_joints: Tensor<B, 1, burn::tensor::Int>,
+    ) -> (Tensor<B, 4>, Tensor<B, 3>, Tensor<B, 2, burn::tensor::Bool>) {
+        let [batch, joints, feature_len, _frames] = motion.dims();
+        assert_eq!(joints, self.max_joints);
+        assert_eq!(feature_len, self.feature_len);
+        assert_eq!(tpos_first_frame.dims(), [batch, joints, feature_len]);
+
+        let tpose = tpos_first_frame.unsqueeze_dim::<4>(1);
+        let root_tpos = self
+            .root_tpos_embedder
+            .forward(tpose.clone().narrow(2, 0, 1));
+        let joint_tpos = self
+            .joint_tpos_embedder
+            .forward(tpose.clone().narrow(2, 1, joints - 1));
+        let parents = tpos_first_frame_parents.unsqueeze_dim::<4>(1);
+        let parent_tpos = self
+            .parent_tpos_embedder
+            .forward(parents.narrow(2, 1, joints - 1));
+        let joint_tpos = self
+            .tpos_fuse
+            .forward(Tensor::cat(vec![joint_tpos, parent_tpos], 3));
+        let tpos_tokens = Tensor::cat(vec![root_tpos, joint_tpos], 2);
+        let tpos_tokens_3d = tpos_tokens
+            .clone()
+            .reshape([batch, joints, self.latent_dim]);
+
+        let joint_positions =
+            Tensor::<B, 1, burn::tensor::Int>::arange(0..self.max_joints as i64, &motion.device())
+                .reshape([1, self.max_joints]);
+        let valid_joints = joint_positions.lower(n_joints.reshape([batch, 1]));
+
+        let motion = motion.permute([0, 3, 1, 2]);
+        let root_motion = self.root_x_embedder.forward(motion.clone().narrow(2, 0, 1));
+        let joint_motion = self
+            .joint_x_embedder
+            .forward(motion.narrow(2, 1, joints - 1));
+        let motion_tokens = Tensor::cat(vec![root_motion, joint_motion], 2);
+        let tokens = Tensor::cat(vec![tpos_tokens, motion_tokens], 1);
+        (tokens, tpos_tokens_3d, valid_joints)
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct FeedForward<B: Backend> {
     /// Matches the upstream block's `mlp` field.
@@ -483,5 +625,141 @@ impl<B: Backend> SpectralJointRoPE<B> {
             (x * cos.clone() + rotated * sin.clone()).cast(dtype)
         };
         (rotate(query), rotate(key))
+    }
+}
+
+/// PyTorch-compatible packed-QKV multi-head attention used by final root aggregation.
+#[derive(Module, Debug)]
+pub struct PackedCrossAttention<B: Backend> {
+    /// PyTorch `MultiheadAttention` stores Q, K, and V in one `[3D,D]` matrix.
+    pub in_proj_weight: Param<Tensor<B, 2>>,
+    pub in_proj_bias: Param<Tensor<B, 1>>,
+    pub out_proj: Linear<B>,
+    heads: usize,
+    head_dim: usize,
+    width: usize,
+}
+
+impl<B: Backend> PackedCrossAttention<B> {
+    pub fn new(width: usize, heads: usize, device: &B::Device) -> Self {
+        assert!(heads > 0 && width % heads == 0);
+        Self {
+            in_proj_weight: burn::module::Initializer::Zeros.init([3 * width, width], device),
+            in_proj_bias: burn::module::Initializer::Zeros.init([3 * width], device),
+            out_proj: LinearConfig::new(width, width).init(device),
+            heads,
+            head_dim: width / heads,
+            width,
+        }
+    }
+
+    pub fn forward(
+        &self,
+        query: Tensor<B, 3>,
+        key_value: Tensor<B, 3>,
+        key_valid: Tensor<B, 2, burn::tensor::Bool>,
+    ) -> Tensor<B, 3> {
+        let [batch_frames, query_len, _] = query.dims();
+        let key_len = key_value.dims()[1];
+        let weights = self.in_proj_weight.val().chunk(3, 0);
+        let biases = self.in_proj_bias.val().chunk(3, 0);
+        let linear = |input: Tensor<B, 3>, weight: Tensor<B, 2>, bias: Tensor<B, 1>| {
+            input.matmul(weight.transpose().unsqueeze_dim::<3>(0))
+                + bias.reshape([1, 1, self.width])
+        };
+        let q = linear(query, weights[0].clone(), biases[0].clone());
+        let k = linear(key_value.clone(), weights[1].clone(), biases[1].clone());
+        let v = linear(key_value, weights[2].clone(), biases[2].clone());
+        let to_heads = |x: Tensor<B, 3>, length: usize| {
+            x.reshape([batch_frames, length, self.heads, self.head_dim])
+                .permute([0, 2, 1, 3])
+        };
+        let q = to_heads(q, query_len);
+        let k = to_heads(k, key_len);
+        let v = to_heads(v, key_len);
+        let logits =
+            (q.matmul(k.swap_dims(2, 3)) * (self.head_dim as f64).powf(-0.5)).cast(DType::F32);
+        let mask = key_valid.reshape([batch_frames, 1, 1, key_len]).bool_not();
+        let weights = softmax(logits.mask_fill(mask, f32::NEG_INFINITY), 3).cast(v.dtype());
+        let output =
+            weights
+                .matmul(v)
+                .permute([0, 2, 1, 3])
+                .reshape([batch_frames, query_len, self.width]);
+        self.out_proj.forward(output)
+    }
+}
+
+/// Final modulation, root aggregation, and distinct root/joint output heads.
+#[derive(Module, Debug)]
+pub struct FinalLayer<B: Backend> {
+    pub norm_final: LlamaRmsNorm<B>,
+    pub root_cross_attn: PackedCrossAttention<B>,
+    pub root_cross_norm_q: LlamaRmsNorm<B>,
+    pub root_cross_norm_kv: LlamaRmsNorm<B>,
+    pub root_out: SiluMlp<B>,
+    pub joint_out: SiluMlp<B>,
+    pub ada_ln_linear: Linear<B>,
+    joint_count: usize,
+    width: usize,
+    feature_len: usize,
+}
+
+impl<B: Backend> FinalLayer<B> {
+    pub fn new(width: usize, feature_len: usize, joint_count: usize, device: &B::Device) -> Self {
+        Self {
+            norm_final: LlamaRmsNorm::new(width, device),
+            root_cross_attn: PackedCrossAttention::new(width, 4, device),
+            root_cross_norm_q: LlamaRmsNorm::new(width, device),
+            root_cross_norm_kv: LlamaRmsNorm::new(width, device),
+            root_out: SiluMlp::new(width, width, feature_len, device),
+            joint_out: SiluMlp::new(width, width, feature_len, device),
+            ada_ln_linear: LinearConfig::new(width, 2 * width).init(device),
+            joint_count,
+            width,
+            feature_len,
+        }
+    }
+
+    /// Input tokens `[B,F,J,D]`, condition `[B,D]`, joint mask `[B,J]`.
+    /// Output is `[B,J,feature_len,F]`, including the prepended t-pose frame.
+    pub fn forward(
+        &self,
+        input: Tensor<B, 4>,
+        condition: Tensor<B, 2>,
+        valid_joints: Tensor<B, 2, burn::tensor::Bool>,
+    ) -> Tensor<B, 4> {
+        let [batch, frames, joints, width] = input.dims();
+        assert_eq!(joints, self.joint_count);
+        assert_eq!(width, self.width);
+        let modulation = silu(condition);
+        let chunks = self.ada_ln_linear.forward(modulation).chunk(2, 1);
+        let x = self
+            .norm_final
+            .forward(input.reshape([batch, frames * joints, width]));
+        let x = x * (chunks[1].clone().unsqueeze_dim::<3>(1) + 1.0)
+            + chunks[0].clone().unsqueeze_dim::<3>(1);
+        let x = x.reshape([batch, frames, joints, width]);
+        let root = x.clone().narrow(2, 0, 1);
+        let joints_x = x.narrow(2, 1, joints - 1);
+        let root_flat = root.clone().reshape([batch * frames, 1, width]);
+        let joints_flat = joints_x
+            .clone()
+            .reshape([batch * frames, joints - 1, width]);
+
+        let valid = valid_joints
+            .narrow(1, 1, joints - 1)
+            .unsqueeze_dim::<3>(1)
+            .repeat_dim(1, frames)
+            .reshape([batch * frames, joints - 1]);
+        let root_query = self.root_cross_norm_q.forward(root_flat);
+        let joint_keys = self.root_cross_norm_kv.forward(joints_flat);
+        let root_agg = self
+            .root_cross_attn
+            .forward(root_query, joint_keys, valid)
+            .reshape([batch, frames, 1, width]);
+        let root = self.root_out.forward(root + root_agg);
+        let joints_x = self.joint_out.forward(joints_x);
+        Tensor::cat(vec![root, joints_x], 2).permute([0, 3, 1, 2])
     }
 }
