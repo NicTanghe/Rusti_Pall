@@ -9,8 +9,9 @@ joint-name embeddings supplied as inputs.
 
 - Burn 0.20.1 is pinned for the ndarray CPU and WGPU (Metal on macOS) backends.
 - The CLI parses and validates a resolved UniMate JSON config.
-- The flow sampler contains Burn tensor operations for classifier-free
-  guidance and an explicit Euler update.
+- Flow sampling supports adaptive Dormand-Prince 5(4) integration with the
+  upstream `atol=1e-6`, `rtol=1e-3`, 50 requested points, and sequential CFG.
+  Fixed-step Euler remains available for preview and editing workflows.
 - Burn's PyTorch reader inventories named tensors in the checkpoint without
   moving them to a device.
 - Rust can read converted normalization JSON and select the root/local stats
@@ -68,10 +69,12 @@ cargo run --locked -- check-weights \
   weights/unimate_uniml3d_f60_v3/ema_named.pt
 ```
 
-The raw model state dictionary has been inventoried. The next correctness
-prerequisite is a PyTorch reference output for one denoiser call; the loader
-only confirms that all tensors have been consumed, not that the Rust forward
-pass matches PyTorch numerically.
+`UniMateDenoiser::sample_dopri5` accepts initial noise and precomputed
+conditioning tensors from an asset-preparation step. A user-facing rig/prompt
+preparation and motion-file output path is not implemented yet. The Rust
+adaptive controller follows the Dormand-Prince 5(4) tableau and tolerances, but
+is not guaranteed to take the same internal steps as torchdiffeq. A PyTorch
+reference output is still needed to establish numerical parity.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.

@@ -15,6 +15,20 @@ use burn::{
 use burn_store::{ApplyResult, ModuleSnapshot, PytorchStore};
 use std::path::Path;
 
+/// Per-rig and per-prompt tensors reused throughout ODE integration.
+pub struct DenoiserCondition<B: Backend> {
+    pub caption_embedding: Tensor<B, 2>,
+    pub tpos_first_frame: Tensor<B, 3>,
+    pub tpos_first_frame_parents: Tensor<B, 3>,
+    pub n_joints: Tensor<B, 1, burn::tensor::Int>,
+    pub motion_lengths: Tensor<B, 1, burn::tensor::Int>,
+    pub joint_names_emb: Tensor<B, 3>,
+    pub joint_depths: Tensor<B, 2, burn::tensor::Int>,
+    pub graph_dist: Tensor<B, 3, burn::tensor::Int>,
+    pub joint_relations: Tensor<B, 3, burn::tensor::Int>,
+    pub spectral_coords: Tensor<B, 3>,
+}
+
 #[derive(Module, Debug)]
 pub struct LlamaRmsNorm<B: Backend> {
     /// Matches the upstream `weight` parameter name.
@@ -484,6 +498,44 @@ impl<B: Backend> UniMateDenoiser<B> {
             ));
         }
         Ok(result)
+    }
+
+    /// Samples from a caller-supplied initial Gaussian tensor using UniMate's
+    /// default adaptive ODE settings and CFG convention.
+    pub fn sample_dopri5(
+        &self,
+        initial_noise: Tensor<B, 4>,
+        condition: &DenoiserCondition<B>,
+        cfg_scale: f32,
+    ) -> Result<(Tensor<B, 4>, crate::sampler::IntegrationStats), String> {
+        crate::sampler::sample_dopri5(initial_noise, 50, |state, time| {
+            crate::sampler::predict_cfg(state, time, cfg_scale, |state, time, unconditional| {
+                let [batch, _, _, _] = state.dims();
+                let time_values = Tensor::<B, 1>::from_data(
+                    TensorData::new(vec![time; batch], [batch]),
+                    &state.device(),
+                );
+                let caption = if unconditional {
+                    condition.caption_embedding.clone() * 0.0
+                } else {
+                    condition.caption_embedding.clone()
+                };
+                self.forward(
+                    state.clone(),
+                    time_values,
+                    caption,
+                    condition.tpos_first_frame.clone(),
+                    condition.tpos_first_frame_parents.clone(),
+                    condition.n_joints.clone(),
+                    condition.motion_lengths.clone(),
+                    condition.joint_names_emb.clone(),
+                    condition.joint_depths.clone(),
+                    condition.graph_dist.clone(),
+                    condition.joint_relations.clone(),
+                    condition.spectral_coords.clone(),
+                )
+            })
+        })
     }
 }
 
