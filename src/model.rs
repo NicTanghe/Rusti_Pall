@@ -204,6 +204,235 @@ impl<B: Backend> InputLayer<B> {
     }
 }
 
+/// Query-based t-pose pooling that injects rig conditioning into adaLN.
+#[derive(Module, Debug)]
+pub struct TposCrossAttentionPool<B: Backend> {
+    pub queries: Param<Tensor<B, 3>>,
+    pub norm_q: LlamaRmsNorm<B>,
+    pub norm_kv: LlamaRmsNorm<B>,
+    pub cross_attn: PackedCrossAttention<B>,
+    pub norm_ff: LlamaRmsNorm<B>,
+    pub ffn: SwiGLUFFN<B>,
+    pub norm_out: LlamaRmsNorm<B>,
+    pub out_proj: Linear<B>,
+    num_queries: usize,
+    width: usize,
+}
+
+impl<B: Backend> TposCrossAttentionPool<B> {
+    pub fn new(width: usize, num_queries: usize, device: &B::Device) -> Self {
+        let queries = burn::module::Initializer::Normal {
+            mean: 0.0,
+            std: 0.02,
+        }
+        .init([1, num_queries, width], device);
+        Self {
+            queries,
+            norm_q: LlamaRmsNorm::new(width, device),
+            norm_kv: LlamaRmsNorm::new(width, device),
+            cross_attn: PackedCrossAttention::new(width, 4, device),
+            norm_ff: LlamaRmsNorm::new(width, device),
+            ffn: SwiGLUFFN::new(width, width * 2, device),
+            norm_out: LlamaRmsNorm::new(width, device),
+            out_proj: LinearConfig::new(width, width).init(device),
+            num_queries,
+            width,
+        }
+    }
+
+    pub fn forward(
+        &self,
+        tpos_emb: Tensor<B, 3>,
+        valid_joints: Tensor<B, 2, burn::tensor::Bool>,
+    ) -> Tensor<B, 2> {
+        let batch = tpos_emb.dims()[0];
+        let query = self.queries.val().repeat_dim(0, batch);
+        let residual = query.clone();
+        let query = self.norm_q.forward(query);
+        let key_value = self.norm_kv.forward(tpos_emb);
+        let query = query.reshape([batch, self.num_queries, self.width]);
+        let pooled = residual.reshape([batch, self.num_queries, self.width])
+            + self.cross_attn.forward(query, key_value, valid_joints);
+        let pooled = pooled.clone() + self.ffn.forward(self.norm_ff.forward(pooled));
+        let pooled = pooled.mean_dim(1).reshape([batch, self.width]);
+        self.out_proj.forward(self.norm_out.forward(pooled))
+    }
+}
+
+/// Module wrapper matching upstream `tpos_pool.pool` parameter prefixes.
+#[derive(Module, Debug)]
+pub struct TposPool<B: Backend> {
+    pub pool: TposCrossAttentionPool<B>,
+}
+
+impl<B: Backend> TposPool<B> {
+    pub fn new(width: usize, num_queries: usize, device: &B::Device) -> Self {
+        Self {
+            pool: TposCrossAttentionPool::new(width, num_queries, device),
+        }
+    }
+
+    pub fn forward(
+        &self,
+        tpos_emb: Tensor<B, 3>,
+        valid_joints: Tensor<B, 2, burn::tensor::Bool>,
+    ) -> Tensor<B, 2> {
+        self.pool.forward(tpos_emb, valid_joints)
+    }
+}
+
+/// The released checkpoint adds these per-joint embeddings to every frame.
+#[derive(Module, Debug)]
+pub struct TokenEmbeddings<B: Backend> {
+    pub joint_name_embedder: Linear<B>,
+    pub depth_embedding: Embedding<B>,
+    max_depth: usize,
+}
+
+impl<B: Backend> TokenEmbeddings<B> {
+    pub fn new(text_dim: usize, width: usize, max_depth: usize, device: &B::Device) -> Self {
+        Self {
+            joint_name_embedder: LinearConfig::new(text_dim, width).init(device),
+            depth_embedding: EmbeddingConfig::new(max_depth + 1, width).init(device),
+            max_depth,
+        }
+    }
+
+    pub fn forward(
+        &self,
+        tokens: Tensor<B, 4>,
+        joint_names_emb: Tensor<B, 3>,
+        joint_depths: Tensor<B, 2, burn::tensor::Int>,
+    ) -> Tensor<B, 4> {
+        let frames = tokens.dims()[1];
+        let depths = joint_depths;
+        let depth_mask = depths.clone().greater_elem(self.max_depth as i64);
+        let depths = depths.mask_fill(depth_mask, self.max_depth as i64);
+        let depth = self.depth_embedding.forward(depths).unsqueeze_dim::<4>(1);
+        let names = self
+            .joint_name_embedder
+            .forward(joint_names_emb)
+            .unsqueeze_dim::<4>(1);
+        tokens + depth.repeat_dim(1, frames) + names.repeat_dim(1, frames)
+    }
+}
+
+/// Complete released graph/adaLN flow denoiser. Text encoder output and
+/// canonical skeleton features are inputs; this struct performs neural
+/// inference only and leaves ODE integration to `sampler`.
+#[derive(Module, Debug)]
+pub struct UniMateDenoiser<B: Backend> {
+    pub time_embedder: TimestepEmbedder<B>,
+    pub cond_embedder: Linear<B>,
+    pub input_layer: InputLayer<B>,
+    pub tpos_pool: TposPool<B>,
+    pub token_embeddings: TokenEmbeddings<B>,
+    pub transformer_blocks: Vec<SpatioTemporalBlock<B>>,
+    pub final_layer: FinalLayer<B>,
+    max_motion_length: usize,
+    max_joints: usize,
+    latent_dim: usize,
+    text_dim: usize,
+    feature_len: usize,
+}
+
+impl<B: Backend> UniMateDenoiser<B> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        feature_len: usize,
+        max_motion_length: usize,
+        max_joints: usize,
+        max_depth: usize,
+        latent_dim: usize,
+        ff_size: usize,
+        num_layers: usize,
+        num_heads: usize,
+        max_freqs: usize,
+        text_dim: usize,
+        num_tpos_queries: usize,
+        device: &B::Device,
+    ) -> Self {
+        let max_frames = max_motion_length + 1;
+        let transformer_blocks = (0..num_layers)
+            .map(|_| {
+                SpatioTemporalBlock::new(
+                    latent_dim, ff_size, num_heads, max_freqs, max_frames, device,
+                )
+            })
+            .collect();
+        Self {
+            time_embedder: TimestepEmbedder::new(latent_dim, device),
+            cond_embedder: LinearConfig::new(text_dim, latent_dim).init(device),
+            input_layer: InputLayer::new(feature_len, latent_dim, max_joints, device),
+            tpos_pool: TposPool::new(latent_dim, num_tpos_queries, device),
+            token_embeddings: TokenEmbeddings::new(text_dim, latent_dim, max_depth, device),
+            transformer_blocks,
+            final_layer: FinalLayer::new(latent_dim, feature_len, max_joints, device),
+            max_motion_length,
+            max_joints,
+            latent_dim,
+            text_dim,
+            feature_len,
+        }
+    }
+
+    /// Inputs use the same canonical forms as UniMate's graph/adaLN forward:
+    /// motion `[B,J,D,F]`, prompt/joint embeddings `[B,(J),text_dim]`,
+    /// topology matrices `[B,J,J]`, and per-joint spectral/depth features.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        motion: Tensor<B, 4>,
+        timesteps: Tensor<B, 1>,
+        caption_embedding: Tensor<B, 2>,
+        tpos_first_frame: Tensor<B, 3>,
+        tpos_first_frame_parents: Tensor<B, 3>,
+        n_joints: Tensor<B, 1, burn::tensor::Int>,
+        motion_lengths: Tensor<B, 1, burn::tensor::Int>,
+        joint_names_emb: Tensor<B, 3>,
+        joint_depths: Tensor<B, 2, burn::tensor::Int>,
+        graph_dist: Tensor<B, 3, burn::tensor::Int>,
+        joint_relations: Tensor<B, 3, burn::tensor::Int>,
+        spectral_coords: Tensor<B, 3>,
+    ) -> Tensor<B, 4> {
+        let [batch, joints, feature_len, frames] = motion.dims();
+        assert_eq!(joints, self.max_joints);
+        assert_eq!(feature_len, self.feature_len);
+        assert_eq!(frames, self.max_motion_length);
+        assert_eq!(caption_embedding.dims(), [batch, self.text_dim]);
+
+        let (mut tokens, tpos_tokens, valid_joints) =
+            self.input_layer
+                .forward(motion, tpos_first_frame, tpos_first_frame_parents, n_joints);
+        let condition =
+            self.time_embedder.forward(timesteps) + self.cond_embedder.forward(caption_embedding);
+        let condition = condition + self.tpos_pool.forward(tpos_tokens, valid_joints.clone());
+        tokens = self
+            .token_embeddings
+            .forward(tokens, joint_names_emb, joint_depths);
+
+        let positions =
+            Tensor::<B, 1, burn::tensor::Int>::arange(0..(frames + 1) as i64, &tokens.device())
+                .reshape([1, frames + 1]);
+        let valid_frames = positions.lower(motion_lengths.reshape([batch, 1]) + 1);
+        for block in &self.transformer_blocks {
+            tokens = block.forward(
+                tokens,
+                condition.clone(),
+                valid_frames.clone(),
+                graph_dist.clone(),
+                joint_relations.clone(),
+                valid_joints.clone(),
+                spectral_coords.clone(),
+            );
+        }
+        self.final_layer
+            .forward(tokens, condition, valid_joints)
+            .narrow(2, 1, frames)
+            .permute([0, 3, 1, 2])
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct FeedForward<B: Backend> {
     /// Matches the upstream block's `mlp` field.
@@ -244,24 +473,40 @@ pub struct SpatialGraphSelfAttention<B: Backend> {
     pub q_norm: LlamaRmsNorm<B>,
     pub k_norm: LlamaRmsNorm<B>,
     pub rope: SpectralJointRoPE<B>,
+    pub graph_dist_embedding: Embedding<B>,
+    pub graph_dist_proj: Linear<B>,
+    pub graph_dist_scale: Param<Tensor<B, 1>>,
+    pub graph_rel_embedding: Embedding<B>,
+    pub graph_rel_proj: Linear<B>,
+    pub graph_rel_scale: Param<Tensor<B, 1>>,
     heads: usize,
     head_dim: usize,
     scale: f64,
+    graph_feature_dim: usize,
 }
 
 impl<B: Backend> SpatialGraphSelfAttention<B> {
     pub fn new(width: usize, heads: usize, max_freqs: usize, device: &B::Device) -> Self {
         assert!(heads > 0 && width % heads == 0);
         let head_dim = width / heads;
+        let graph_feature_dim = width / 4;
+        let scale_init = burn::module::Initializer::Constant { value: 0.02 };
         Self {
             qkv: LinearConfig::new(width, width * 3).init(device),
             proj: LinearConfig::new(width, width).init(device),
             q_norm: LlamaRmsNorm::new(head_dim, device),
             k_norm: LlamaRmsNorm::new(head_dim, device),
             rope: SpectralJointRoPE::new(head_dim, max_freqs, device),
+            graph_dist_embedding: EmbeddingConfig::new(6, graph_feature_dim).init(device),
+            graph_dist_proj: LinearConfig::new(graph_feature_dim, heads).init(device),
+            graph_dist_scale: scale_init.init([1], device),
+            graph_rel_embedding: EmbeddingConfig::new(6, graph_feature_dim).init(device),
+            graph_rel_proj: LinearConfig::new(graph_feature_dim, heads).init(device),
+            graph_rel_scale: scale_init.init([1], device),
             heads,
             head_dim,
             scale: (head_dim as f64).powf(-0.5),
+            graph_feature_dim,
         }
     }
 
@@ -269,10 +514,31 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
     pub fn forward(
         &self,
         input: Tensor<B, 4>,
-        graph_bias: Tensor<B, 4>,
+        graph_dist: Tensor<B, 3, burn::tensor::Int>,
+        joint_relations: Tensor<B, 3, burn::tensor::Int>,
+        valid_joints: Tensor<B, 2, burn::tensor::Bool>,
         spectral_coords: Tensor<B, 3>,
     ) -> Tensor<B, 4> {
         let [batch, frames, joints, width] = input.dims();
+        let pair_count = joints * joints;
+        let dist = self
+            .graph_dist_embedding
+            .forward(graph_dist.reshape([batch, pair_count]))
+            .reshape([batch, joints, joints, self.graph_feature_dim]);
+        let rel = self
+            .graph_rel_embedding
+            .forward(joint_relations.reshape([batch, pair_count]))
+            .reshape([batch, joints, joints, self.graph_feature_dim]);
+        let dist =
+            self.graph_dist_proj.forward(dist) * self.graph_dist_scale.val().reshape([1, 1, 1, 1]);
+        let rel =
+            self.graph_rel_proj.forward(rel) * self.graph_rel_scale.val().reshape([1, 1, 1, 1]);
+        let valid = valid_joints
+            .reshape([batch, 1, joints])
+            .unsqueeze_dim::<4>(1);
+        let graph_bias = (dist + rel)
+            .permute([0, 3, 1, 2])
+            .mask_fill(valid.bool_not(), f32::NEG_INFINITY);
         let qkv = self.qkv.forward(input).chunk(3, 3);
         let to_heads = |tensor: Tensor<B, 4>| {
             tensor
@@ -503,7 +769,9 @@ impl<B: Backend> SpatioTemporalBlock<B> {
         x: Tensor<B, 4>,
         condition: Tensor<B, 2>,
         valid_frames: Tensor<B, 2, burn::tensor::Bool>,
-        graph_bias: Tensor<B, 4>,
+        graph_dist: Tensor<B, 3, burn::tensor::Int>,
+        joint_relations: Tensor<B, 3, burn::tensor::Int>,
+        valid_joints: Tensor<B, 2, burn::tensor::Bool>,
         spectral_coords: Tensor<B, 3>,
     ) -> Tensor<B, 4> {
         let [batch, _, _, width] = x.dims();
@@ -515,9 +783,13 @@ impl<B: Backend> SpatioTemporalBlock<B> {
         let dtype = x.dtype();
         let spatial_input = self.norm_s.forward(x.clone().cast(DType::F32)).cast(dtype);
         let spatial_input = spatial_input * (expand(1) + 1.0) + expand(0);
-        let spatial = self
-            .s_attn
-            .forward(spatial_input, graph_bias, spectral_coords);
+        let spatial = self.s_attn.forward(
+            spatial_input,
+            graph_dist,
+            joint_relations,
+            valid_joints,
+            spectral_coords,
+        );
         let x = x + expand(2) * spatial;
 
         let temporal_input = self.norm_t.forward(x.clone().cast(DType::F32)).cast(dtype);

@@ -19,10 +19,12 @@ joint-name embeddings supplied as inputs.
   graph distance/relation bias, SignNet spectral RoPE, temporal RoPE, and
   spatial graph attention with spectral rotations wired into Q/K. It also has
   temporal self-attention, the graph/adaLN spatiotemporal block, flow-time
-  embedding, root/joint input embedding, and the final root/joint output layer.
-- The conditioning pool/token embeddings, complete denoiser assembly, EMA
-  model loading, and reference fixtures are still in progress. No model weights
-  are tracked in Git.
+  embedding, root/joint input embedding, t-pose conditioning pool, depth/name
+  token embeddings, final root/joint output layer, and the assembled denoiser
+  forward pass.
+- EMA model loading and PyTorch parity fixtures are still in progress. The
+  assembled network has only been compile-checked so far. No model weights are
+  tracked in Git.
 
 ## Run
 
