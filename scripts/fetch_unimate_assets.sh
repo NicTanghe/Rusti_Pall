@@ -24,7 +24,7 @@ download_asset() {
         return
     fi
 
-    : > "${partial}"
+    : >> "${partial}"
     printf 'Downloading %s\n' "${relative_path}"
     curl --fail --location --retry 3 --retry-all-errors --continue-at - \
         --output "${partial}" "${hub_base}/${relative_path}"

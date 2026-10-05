@@ -26,6 +26,35 @@ pub fn inspect_ema(path: impl AsRef<Path>) -> Result<CheckpointManifest, String>
     let reader = PytorchReader::with_top_level_key(path, "ema_state_dict")
         .map_err(|error| format!("could not read EMA tensors: {error}"))?;
 
+    if reader.is_empty() {
+        return Err(
+            "this UniMate checkpoint stores EMA values as a positional shadow_params list, which Burn's PyTorch reader cannot name directly; run scripts/export_ema_state_dict.py first".to_owned(),
+        );
+    }
+
+    manifest_from_reader(path, "ema_state_dict", reader)
+}
+
+pub fn inspect_state_dict(
+    path: impl AsRef<Path>,
+    top_level_key: Option<&str>,
+) -> Result<CheckpointManifest, String> {
+    let path = path.as_ref();
+    let reader = if let Some(key) = top_level_key {
+        PytorchReader::with_top_level_key(path, key)
+    } else {
+        PytorchReader::new(path)
+    }
+    .map_err(|error| format!("could not read named tensors: {error}"))?;
+
+    manifest_from_reader(path, top_level_key.unwrap_or("root"), reader)
+}
+
+fn manifest_from_reader(
+    path: &Path,
+    top_level_key: &str,
+    reader: PytorchReader,
+) -> Result<CheckpointManifest, String> {
     let mut names = reader.keys();
     names.sort();
     let tensors = names
@@ -44,7 +73,7 @@ pub fn inspect_ema(path: impl AsRef<Path>) -> Result<CheckpointManifest, String>
 
     Ok(CheckpointManifest {
         source: path.display().to_string(),
-        top_level_key: "ema_state_dict".to_owned(),
+        top_level_key: top_level_key.to_owned(),
         tensor_count: tensors.len(),
         tensors,
     })

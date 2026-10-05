@@ -1,4 +1,5 @@
 mod checkpoint;
+pub mod normalization;
 pub mod sampler;
 pub mod unimate;
 
@@ -8,10 +9,12 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("inspect-ema") => inspect_checkpoint(args.collect()),
-        Some(config_path) => validate_config(config_path),
+        Some("inspect-model") => inspect_named_checkpoint(args.collect(), Some("model_state_dict")),
+        Some("inspect-weights") => inspect_named_checkpoint(args.collect(), None),
+        Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]"
             );
             ExitCode::from(2)
         }
@@ -44,6 +47,37 @@ fn inspect_checkpoint(args: Vec<String>) -> ExitCode {
         }
         Err(error) => {
             eprintln!("Could not inspect checkpoint: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn inspect_named_checkpoint(args: Vec<String>, top_level_key: Option<&str>) -> ExitCode {
+    let Some(checkpoint_path) = args.first() else {
+        eprintln!("Expected a checkpoint or named weight file");
+        return ExitCode::from(2);
+    };
+
+    match checkpoint::inspect_state_dict(checkpoint_path, top_level_key) {
+        Ok(manifest) => {
+            println!("Named tensors: {}", manifest.tensor_count);
+            if let Some(output_path) = args.get(1) {
+                match checkpoint::write_manifest(&manifest, output_path) {
+                    Ok(()) => println!("Wrote tensor manifest to {output_path}"),
+                    Err(error) => {
+                        eprintln!("Could not write manifest: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                for tensor in &manifest.tensors {
+                    println!("{}\t{:?}\t{}", tensor.name, tensor.shape, tensor.dtype);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Could not inspect weights: {error}");
             ExitCode::FAILURE
         }
     }
