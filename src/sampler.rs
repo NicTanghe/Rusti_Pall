@@ -3,7 +3,21 @@
 //! The model call stays outside this module so the sampler can be validated
 //! independently of the architecture port.
 
-use burn::tensor::{Tensor, backend::Backend};
+use burn::tensor::{Distribution, Tensor, backend::Backend};
+
+/// Create the standard-normal initial state used by flow sampling.
+///
+/// Seeding is backend-wide for the selected device, not scoped to this call.
+/// Use this before constructing other randomized tensors, and pass an explicit
+/// initial tensor when comparing different backends against the same noise.
+pub fn standard_normal_noise<B: Backend, const D: usize>(
+    shape: [usize; D],
+    seed: u64,
+    device: &B::Device,
+) -> Tensor<B, D> {
+    B::seed(device, seed);
+    Tensor::random(shape, Distribution::Normal(0.0, 1.0), device)
+}
 
 /// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
 pub fn classifier_free_guidance<B: Backend, const D: usize>(

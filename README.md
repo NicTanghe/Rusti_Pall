@@ -69,12 +69,15 @@ cargo run --locked -- check-weights \
   weights/unimate_uniml3d_f60_v3/ema_named.pt
 ```
 
-`UniMateDenoiser::sample_dopri5` accepts initial noise and precomputed
-conditioning tensors from an asset-preparation step. A user-facing rig/prompt
-preparation and motion-file output path is not implemented yet. The Rust
-adaptive controller follows the Dormand-Prince 5(4) tableau and tolerances, but
-is not guaranteed to take the same internal steps as torchdiffeq. A PyTorch
-reference output is still needed to establish numerical parity.
+`sampler::standard_normal_noise` creates reproducible standard-normal initial
+noise on the selected Burn device, and `UniMateDenoiser::sample_dopri5` accepts
+that noise plus precomputed conditioning tensors from an asset-preparation
+step. Burn seeding is backend-wide for the selected device; pass a saved noise
+tensor when comparing backends. A user-facing rig/prompt preparation and
+motion-file output path is not implemented yet. The Rust adaptive controller
+follows the Dormand-Prince 5(4) tableau and tolerances, but is not guaranteed to
+take the same internal steps as torchdiffeq. A PyTorch reference output is
+still needed to establish numerical parity.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.
