@@ -20,6 +20,8 @@ pub struct ExperimentConfig {
 pub struct DatasetConfig {
     pub max_motion_length: usize,
     pub max_joints: usize,
+    pub max_depth: usize,
+    pub feature_len: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,12 +34,17 @@ pub struct ModelConfig {
     pub num_heads: usize,
     pub concat_parent_features: bool,
     pub use_graph_emb: bool,
+    pub use_graph_attn_bias: bool,
+    pub share_graph_attn_bias: bool,
     pub use_depth_emb: bool,
+    pub use_joint_name_emb: bool,
     pub use_spectral_rope: bool,
     pub max_freqs: usize,
     pub use_signnet: bool,
     pub inject_tpos_to_adaln: bool,
     pub num_tpos_queries: usize,
+    pub cond_mode: String,
+    pub text_encoder_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,11 +81,22 @@ impl UniMateConfig {
         if model.use_graph_emb {
             return Err("GCN graph embeddings are outside the initial inference target");
         }
+        if !model.use_graph_attn_bias || model.share_graph_attn_bias {
+            return Err("this port expects per-layer graph attention bias parameters");
+        }
+        if !model.use_joint_name_emb || model.cond_mode != "text" {
+            return Err("this port expects text conditioning and joint-name embeddings");
+        }
+        if model.text_encoder_version != "google/flan-t5-base" {
+            return Err("this port currently expects google/flan-t5-base embeddings");
+        }
         if !self.training.use_ema {
             return Err("inference expects EMA checkpoint weights");
         }
         if self.dataset.max_motion_length == 0
             || self.dataset.max_joints == 0
+            || self.dataset.feature_len == 0
+            || self.dataset.max_depth == 0
             || model.num_layers == 0
         {
             return Err("frame, joint, and layer limits must be nonzero");

@@ -12,12 +12,44 @@ fn main() -> ExitCode {
         Some("inspect-ema") => inspect_checkpoint(args.collect()),
         Some("inspect-model") => inspect_named_checkpoint(args.collect(), Some("model_state_dict")),
         Some("inspect-weights") => inspect_named_checkpoint(args.collect(), None),
+        Some("check-weights") => check_weights(args.collect()),
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+fn check_weights(args: Vec<String>) -> ExitCode {
+    let (Some(config_path), Some(weights_path)) = (args.first(), args.get(1)) else {
+        eprintln!("Usage: rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>");
+        return ExitCode::from(2);
+    };
+    let result = fs::read_to_string(config_path)
+        .map_err(anyhow_io)
+        .and_then(|contents| {
+            serde_json::from_str::<unimate::UniMateConfig>(&contents).map_err(|e| e.to_string())
+        })
+        .and_then(|config| {
+            type CpuBackend = burn::backend::NdArray<f32>;
+            let device = Default::default();
+            let mut model = model::UniMateDenoiser::<CpuBackend>::from_config(&config, &device)?;
+            model.load_ema_weights(weights_path)
+        });
+    match result {
+        Ok(report) => {
+            println!(
+                "Loaded {} EMA tensors into the Burn model",
+                report.applied.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Could not load EMA weights: {error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -111,9 +143,7 @@ fn validate_config(config_path: String) -> ExitCode {
                 config.model.latent_dim,
                 config.model.num_heads
             );
-            println!(
-                "Burn sampler core is ready; checkpoint loading and model layers are the next porting step."
-            );
+            println!("Burn inference model and EMA weight loader are available.");
             ExitCode::SUCCESS
         }
         Err(error) => {

@@ -22,15 +22,16 @@ joint-name embeddings supplied as inputs.
   embedding, root/joint input embedding, t-pose conditioning pool, depth/name
   token embeddings, final root/joint output layer, and the assembled denoiser
   forward pass.
-- EMA model loading and PyTorch parity fixtures are still in progress. The
-  assembled network has only been compile-checked so far. No model weights are
-  tracked in Git.
+- A strict EMA loader maps the converted PyTorch parameter names to the Burn
+  module names and refuses missing or unused tensors. Numerical parity against
+  PyTorch is still unverified. No model weights are tracked in Git.
 
 ## Run
 
 ```sh
 cargo run -- path/to/config.json
 cargo run -- inspect-model path/to/checkpoint.pt path/to/model_manifest.json
+cargo run -- check-weights path/to/config.json path/to/ema_named.pt
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -62,12 +63,15 @@ python3 scripts/export_ema_state_dict.py
 cargo run --locked -- inspect-weights \
   weights/unimate_uniml3d_f60_v3/ema_named.pt \
   weights/unimate_uniml3d_f60_v3/ema_manifest.json
+cargo run --locked -- check-weights \
+  weights/unimate_uniml3d_f60_v3/config.json \
+  weights/unimate_uniml3d_f60_v3/ema_named.pt
 ```
 
-The raw model state dictionary has been inventoried. Before motion generation
-is implemented, the remaining correctness prerequisite is a PyTorch reference
-output for one denoiser call. That fixture will anchor the Burn module parity
-checks.
+The raw model state dictionary has been inventoried. The next correctness
+prerequisite is a PyTorch reference output for one denoiser call; the loader
+only confirms that all tensors have been consumed, not that the Rust forward
+pass matches PyTorch numerically.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.

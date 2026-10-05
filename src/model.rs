@@ -12,6 +12,8 @@ use burn::{
         backend::Backend,
     },
 };
+use burn_store::{ApplyResult, ModuleSnapshot, PytorchStore};
+use std::path::Path;
 
 #[derive(Module, Debug)]
 pub struct LlamaRmsNorm<B: Backend> {
@@ -337,6 +339,28 @@ pub struct UniMateDenoiser<B: Backend> {
 }
 
 impl<B: Backend> UniMateDenoiser<B> {
+    pub fn from_config(
+        config: &crate::unimate::UniMateConfig,
+        device: &B::Device,
+    ) -> Result<Self, String> {
+        config.validate().map_err(str::to_owned)?;
+        let model = &config.model;
+        Ok(Self::new(
+            config.dataset.feature_len,
+            config.dataset.max_motion_length,
+            config.dataset.max_joints,
+            config.dataset.max_depth,
+            model.latent_dim,
+            model.ff_size,
+            model.num_layers,
+            model.num_heads,
+            model.max_freqs,
+            768, // google/flan-t5-base hidden width
+            model.num_tpos_queries,
+            device,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         feature_len: usize,
@@ -430,6 +454,36 @@ impl<B: Backend> UniMateDenoiser<B> {
             .forward(tokens, condition, valid_joints)
             .narrow(2, 1, frames)
             .permute([0, 3, 1, 2])
+    }
+
+    /// Loads the named EMA state dictionary produced by
+    /// `scripts/export_ema_state_dict.py`. Missing parameters are rejected by
+    /// Burn's strict store; extra checkpoint parameters are rejected here.
+    pub fn load_ema_weights(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, String> {
+        let mut store = PytorchStore::from_file(path.as_ref().to_path_buf())
+            .map_indices_contiguous(false)
+            // Sequential PyTorch modules retain indices 0 and 2 around SiLU.
+            .with_key_remapping(r"\.linear_0\.", ".0.")
+            .with_key_remapping(r"\.linear_2\.", ".2.")
+            .with_key_remapping(r"\.mlp_0\.", ".mlp.0.")
+            .with_key_remapping(r"\.mlp_2\.", ".mlp.2.")
+            .with_key_remapping(r"\.phi_0\.", ".phi.0.")
+            .with_key_remapping(r"\.phi_2\.", ".phi.2.")
+            .with_key_remapping(r"\.rho_0\.", ".rho.0.")
+            .with_key_remapping(r"\.rho_2\.", ".rho.2.")
+            .with_key_remapping(r"\.ada_ln_linear\.", ".adaLN_modulation.1.")
+            .with_key_remapping(r"^token_embeddings\.", "");
+        let result = self
+            .load_from(&mut store)
+            .map_err(|error| format!("could not load EMA weights: {error}"))?;
+        if !result.unused.is_empty() {
+            return Err(format!(
+                "EMA file contains {} unconsumed tensors; refusing a partial or mismatched load:\n{}",
+                result.unused.len(),
+                result.unused.join("\n")
+            ));
+        }
+        Ok(result)
     }
 }
 
