@@ -17,10 +17,10 @@ joint-name embeddings supplied as inputs.
   for each joint.
 - `src/model.rs` implements checkpoint-shaped RMSNorm, SwiGLU feed-forward, the
   graph distance/relation bias, SignNet spectral RoPE, temporal RoPE, and
-  spatial graph attention with spectral rotations wired into Q/K.
-- Temporal attention, the transformer block and complete denoiser, EMA model
-  loading, and reference fixtures are still in progress. No model weights are
-  tracked in Git.
+  spatial graph attention with spectral rotations wired into Q/K. It also has
+  temporal self-attention and the graph/adaLN spatiotemporal block.
+- The complete denoiser, EMA model loading, and reference fixtures are still
+  in progress. No model weights are tracked in Git.
 
 ## Run
 
