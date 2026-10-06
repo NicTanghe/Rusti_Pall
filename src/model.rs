@@ -268,7 +268,9 @@ impl<B: Backend> TposCrossAttentionPool<B> {
         let key_value = self.norm_kv.forward(tpos_emb);
         let query = query.reshape([batch, self.num_queries, self.width]);
         let pooled = residual.reshape([batch, self.num_queries, self.width])
-            + self.cross_attn.forward(query, key_value, valid_joints);
+            + self
+                .cross_attn
+                .forward(query, key_value.clone(), key_value, valid_joints);
         let pooled = pooled.clone() + self.ffn.forward(self.norm_ff.forward(pooled));
         let pooled = pooled.mean_dim(1).reshape([batch, self.width]);
         self.out_proj.forward(self.norm_out.forward(pooled))
@@ -432,6 +434,78 @@ impl<B: Backend> UniMateDenoiser<B> {
         joint_relations: Tensor<B, 3, burn::tensor::Int>,
         spectral_coords: Tensor<B, 3>,
     ) -> Tensor<B, 4> {
+        self.forward_impl(
+            motion,
+            timesteps,
+            caption_embedding,
+            tpos_first_frame,
+            tpos_first_frame_parents,
+            n_joints,
+            motion_lengths,
+            joint_names_emb,
+            joint_depths,
+            graph_dist,
+            joint_relations,
+            spectral_coords,
+            false,
+        )
+        .0
+    }
+
+    /// Runs the same forward path while retaining major 4-D activations for
+    /// reference comparison. Trace tensors are returned in execution order:
+    /// input tokens, token embeddings, each transformer block, final layer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_trace(
+        &self,
+        motion: Tensor<B, 4>,
+        timesteps: Tensor<B, 1>,
+        caption_embedding: Tensor<B, 2>,
+        tpos_first_frame: Tensor<B, 3>,
+        tpos_first_frame_parents: Tensor<B, 3>,
+        n_joints: Tensor<B, 1, burn::tensor::Int>,
+        motion_lengths: Tensor<B, 1, burn::tensor::Int>,
+        joint_names_emb: Tensor<B, 3>,
+        joint_depths: Tensor<B, 2, burn::tensor::Int>,
+        graph_dist: Tensor<B, 3, burn::tensor::Int>,
+        joint_relations: Tensor<B, 3, burn::tensor::Int>,
+        spectral_coords: Tensor<B, 3>,
+    ) -> (Tensor<B, 4>, Vec<Tensor<B, 4>>) {
+        self.forward_impl(
+            motion,
+            timesteps,
+            caption_embedding,
+            tpos_first_frame,
+            tpos_first_frame_parents,
+            n_joints,
+            motion_lengths,
+            joint_names_emb,
+            joint_depths,
+            graph_dist,
+            joint_relations,
+            spectral_coords,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_impl(
+        &self,
+        motion: Tensor<B, 4>,
+        timesteps: Tensor<B, 1>,
+        caption_embedding: Tensor<B, 2>,
+        tpos_first_frame: Tensor<B, 3>,
+        tpos_first_frame_parents: Tensor<B, 3>,
+        n_joints: Tensor<B, 1, burn::tensor::Int>,
+        motion_lengths: Tensor<B, 1, burn::tensor::Int>,
+        joint_names_emb: Tensor<B, 3>,
+        joint_depths: Tensor<B, 2, burn::tensor::Int>,
+        graph_dist: Tensor<B, 3, burn::tensor::Int>,
+        joint_relations: Tensor<B, 3, burn::tensor::Int>,
+        spectral_coords: Tensor<B, 3>,
+        retain_trace: bool,
+    ) -> (Tensor<B, 4>, Vec<Tensor<B, 4>>) {
+        let mut trace = Vec::new();
         let [batch, joints, feature_len, frames] = motion.dims();
         assert_eq!(joints, self.max_joints);
         assert_eq!(feature_len, self.feature_len);
@@ -441,12 +515,18 @@ impl<B: Backend> UniMateDenoiser<B> {
         let (mut tokens, tpos_tokens, valid_joints) =
             self.input_layer
                 .forward(motion, tpos_first_frame, tpos_first_frame_parents, n_joints);
+        if retain_trace {
+            trace.push(tokens.clone());
+        }
         let condition =
             self.time_embedder.forward(timesteps) + self.cond_embedder.forward(caption_embedding);
         let condition = condition + self.tpos_pool.forward(tpos_tokens, valid_joints.clone());
         tokens = self
             .token_embeddings
             .forward(tokens, joint_names_emb, joint_depths);
+        if retain_trace {
+            trace.push(tokens.clone());
+        }
 
         let positions =
             Tensor::<B, 1, burn::tensor::Int>::arange(0..(frames + 1) as i64, &tokens.device())
@@ -463,11 +543,16 @@ impl<B: Backend> UniMateDenoiser<B> {
                 spectral_coords.clone(),
                 &self.rope_j,
             );
+            if retain_trace {
+                trace.push(tokens.clone());
+            }
         }
-        self.final_layer
-            .forward(tokens, condition, valid_joints)
-            .narrow(2, 1, frames)
-            .permute([0, 3, 1, 2])
+        let final_output = self.final_layer.forward(tokens, condition, valid_joints);
+        if retain_trace {
+            trace.push(final_output.clone());
+        }
+        let output = final_output.narrow(2, 1, frames).permute([0, 3, 1, 2]);
+        (output, trace)
     }
 
     /// Loads the named EMA state dictionary produced by
@@ -968,7 +1053,7 @@ impl TemporalRoPE {
         for position in 0..sequence {
             let mut angles = Vec::with_capacity(half);
             for index in 0..half {
-                let inverse_frequency = self.base.powf(-(index as f64) / head_dim as f64);
+                let inverse_frequency = self.base.powf(-((2 * index) as f64) / head_dim as f64);
                 angles.push(position as f64 * inverse_frequency);
             }
             for angle in angles.iter().chain(angles.iter()) {
@@ -1055,11 +1140,12 @@ impl<B: Backend> PackedCrossAttention<B> {
     pub fn forward(
         &self,
         query: Tensor<B, 3>,
-        key_value: Tensor<B, 3>,
+        key_input: Tensor<B, 3>,
+        value_input: Tensor<B, 3>,
         key_valid: Tensor<B, 2, burn::tensor::Bool>,
     ) -> Tensor<B, 3> {
         let [batch_frames, query_len, _] = query.dims();
-        let key_len = key_value.dims()[1];
+        let key_len = key_input.dims()[1];
         let weights = self.in_proj_weight.val().chunk(3, 0);
         let biases = self.in_proj_bias.val().chunk(3, 0);
         let linear = |input: Tensor<B, 3>, weight: Tensor<B, 2>, bias: Tensor<B, 1>| {
@@ -1067,8 +1153,8 @@ impl<B: Backend> PackedCrossAttention<B> {
                 + bias.reshape([1, 1, self.width])
         };
         let q = linear(query, weights[0].clone(), biases[0].clone());
-        let k = linear(key_value.clone(), weights[1].clone(), biases[1].clone());
-        let v = linear(key_value, weights[2].clone(), biases[2].clone());
+        let k = linear(key_input, weights[1].clone(), biases[1].clone());
+        let v = linear(value_input, weights[2].clone(), biases[2].clone());
         let to_heads = |x: Tensor<B, 3>, length: usize| {
             x.reshape([batch_frames, length, self.heads, self.head_dim])
                 .permute([0, 2, 1, 3])
@@ -1152,10 +1238,10 @@ impl<B: Backend> FinalLayer<B> {
             .repeat_dim(1, frames)
             .reshape([batch * frames, joints - 1]);
         let root_query = self.root_cross_norm_q.forward(root_flat);
-        let joint_keys = self.root_cross_norm_kv.forward(joints_flat);
+        let joint_keys = self.root_cross_norm_kv.forward(joints_flat.clone());
         let root_agg = self
             .root_cross_attn
-            .forward(root_query, joint_keys, valid)
+            .forward(root_query, joint_keys, joints_flat, valid)
             .reshape([batch, frames, 1, width]);
         let root = self.root_out.forward(root + root_agg);
         let joints_x = self.joint_out.forward(joints_x);
