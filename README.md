@@ -45,6 +45,7 @@ cargo run -- check-weights path/to/config.json path/to/ema_named.pt
 cargo run -- inspect-burn-weights path/to/ema_named.pt
 cargo run -- compare-forward path/to/config.json path/to/ema_named.pt path/to/fixture.pt
 cargo run -- compare-forward-cpu path/to/config.json path/to/ema_named.pt path/to/fixture.pt
+cargo run -- sample path/to/config.json path/to/ema_named.pt conditioning.pt motion.npy [seed] [cfg_scale]
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -106,6 +107,13 @@ cargo run --locked -- compare-sample \
   weights/unimate_uniml3d_f60_v3/sampling_fixture.config.json \
   weights/unimate_uniml3d_f60_v3/ema_named.pt \
   weights/unimate_uniml3d_f60_v3/sampling_fixture.pt 3.0
+
+# Generate a normalized motion tensor using Metal on macOS.
+cargo run --locked -- sample \
+  weights/unimate_uniml3d_f60_v3/sampling_fixture.config.json \
+  weights/unimate_uniml3d_f60_v3/ema_named.pt \
+  weights/unimate_uniml3d_f60_v3/sampling_fixture.pt \
+  weights/unimate_uniml3d_f60_v3/motion.npy 10 3.0
 ```
 
 The fixture records activations before/after token embedding, after every
@@ -117,15 +125,20 @@ and `compare-forward-wgpu` are equivalent explicit aliases, while
 cannot see the adapter, run the command from a normal macOS Terminal session
 with GPU access.
 
-`sampler::standard_normal_noise` creates reproducible standard-normal initial
-noise on the selected Burn device, and `UniMateDenoiser::sample_dopri5` accepts
-that noise plus precomputed conditioning tensors from an asset-preparation
-step. Burn seeding is backend-wide for the selected device; pass a saved noise
-tensor when comparing backends. A user-facing rig/prompt preparation and
-motion-file output path is not implemented yet. Rust uses the Dormand-Prince
-5(4) tableau, torchdiffeq-style initial-step selection, and the released
-tolerances. Reduced-shape end-to-end samples are close; full-shape ODE parity
-and asset-to-animation output remain outstanding.
+`sample` runs the full Burn flow sampler on WGPU (Metal on macOS), creates
+seeded initial Gaussian noise, and writes normalized feature values as a
+float32 NumPy array with shape `[batch, joints, features, frames]`. Its input
+`conditioning.pt` is a PyTorch tensor dictionary containing `caption_embedding`
+`[B,768]`, `tpos_first_frame` and `tpos_first_frame_parents` `[B,J,12]`,
+`n_joints` and `motion_lengths` `[B]`, `joint_names_emb` `[B,J,768]`,
+`joint_depths` `[B,J]`, `graph_dist` and `joint_relations` `[B,J,J]`, and
+`spectral_coords` `[B,J,max_freqs]`. Text embeddings and rig features must
+already be prepared; the standard rig/prompt-to-conditioning preparation and
+denormalization/animation export are still outstanding. Burn seeding is
+backend-wide, so pass the same saved noise tensor when comparing backends.
+Rust uses the Dormand-Prince 5(4) tableau, torchdiffeq-style initial-step
+selection, and the released tolerances. Reduced-shape end-to-end samples are
+close; full-shape ODE parity and asset-to-animation output remain outstanding.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.

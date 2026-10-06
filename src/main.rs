@@ -21,11 +21,12 @@ fn main() -> ExitCode {
         Some("compare-forward-cpu") => compare_forward_cpu(args.collect()),
         Some("compare-forward-metal") => compare_forward_wgpu(args.collect()),
         Some("compare-sample") => compare_sample_wgpu(args.collect()),
+        Some("sample") => sample_wgpu(args.collect()),
         Some("check-weights") => check_weights(args.collect()),
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)\n  rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale]  (WGPU; Metal on macOS)"
             );
             ExitCode::from(2)
         }
@@ -107,6 +108,150 @@ fn compare_sample_with<B: Backend>(args: Vec<String>, device: B::Device) -> Exit
             ExitCode::FAILURE
         }
     }
+}
+
+fn sample_wgpu(args: Vec<String>) -> ExitCode {
+    let (Some(config_path), Some(weights_path), Some(condition_path), Some(output_path)) =
+        (args.first(), args.get(1), args.get(2), args.get(3))
+    else {
+        eprintln!(
+            "Usage: rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale]"
+        );
+        return ExitCode::from(2);
+    };
+    let seed = args
+        .get(4)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10);
+    let requested_scale = args.get(5).and_then(|value| value.parse().ok());
+    let device = burn::backend::wgpu::WgpuDevice::default();
+
+    let result = fs::read_to_string(config_path)
+        .map_err(anyhow_io)
+        .and_then(|contents| {
+            serde_json::from_str::<unimate::UniMateConfig>(&contents).map_err(|e| e.to_string())
+        })
+        .and_then(|config| {
+            let cfg_scale = requested_scale.unwrap_or(config.sampling.cfg_scale);
+            let mut model =
+                model::UniMateDenoiser::<burn::backend::Wgpu>::from_config(&config, &device)?;
+            model.load_ema_weights(weights_path)?;
+            let reader = PytorchReader::new(condition_path)
+                .map_err(|error| format!("could not open conditioning tensors: {error}"))?;
+            let condition = model::DenoiserCondition {
+                caption_embedding: fixture_f32::<2, burn::backend::Wgpu>(
+                    &reader,
+                    "caption_embedding",
+                    &device,
+                )?,
+                tpos_first_frame: fixture_f32::<3, burn::backend::Wgpu>(
+                    &reader,
+                    "tpos_first_frame",
+                    &device,
+                )?,
+                tpos_first_frame_parents: fixture_f32::<3, burn::backend::Wgpu>(
+                    &reader,
+                    "tpos_first_frame_parents",
+                    &device,
+                )?,
+                n_joints: fixture_int::<1, burn::backend::Wgpu>(&reader, "n_joints", &device)?,
+                motion_lengths: fixture_int::<1, burn::backend::Wgpu>(
+                    &reader,
+                    "motion_lengths",
+                    &device,
+                )?,
+                joint_names_emb: fixture_f32::<3, burn::backend::Wgpu>(
+                    &reader,
+                    "joint_names_emb",
+                    &device,
+                )?,
+                joint_depths: fixture_int::<2, burn::backend::Wgpu>(
+                    &reader,
+                    "joint_depths",
+                    &device,
+                )?,
+                graph_dist: fixture_int::<3, burn::backend::Wgpu>(&reader, "graph_dist", &device)?,
+                joint_relations: fixture_int::<3, burn::backend::Wgpu>(
+                    &reader,
+                    "joint_relations",
+                    &device,
+                )?,
+                spectral_coords: fixture_f32::<3, burn::backend::Wgpu>(
+                    &reader,
+                    "spectral_coords",
+                    &device,
+                )?,
+            };
+            let batch = condition.caption_embedding.dims()[0];
+            let initial_noise = sampler::standard_normal_noise::<burn::backend::Wgpu, 4>(
+                [
+                    batch,
+                    config.dataset.max_joints,
+                    config.dataset.feature_len,
+                    config.dataset.max_motion_length,
+                ],
+                seed,
+                &device,
+            );
+            let (sample, stats) = model.sample_dopri5(initial_noise, &condition, cfg_scale)?;
+            let values = sample
+                .into_data()
+                .to_vec::<f32>()
+                .map_err(|error| format!("could not read generated motion: {error}"))?;
+            write_npy_f32(
+                output_path,
+                [
+                    batch,
+                    config.dataset.max_joints,
+                    config.dataset.feature_len,
+                    config.dataset.max_motion_length,
+                ],
+                &values,
+            )?;
+            Ok(stats)
+        });
+
+    match result {
+        Ok(stats) => {
+            println!("Wrote normalized motion samples to {output_path}");
+            println!(
+                "ODE evaluations={}, accepted_steps={}, rejected_steps={}",
+                stats.evaluations, stats.accepted_steps, stats.rejected_steps
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Could not generate motion: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn write_npy_f32(path: &str, shape: [usize; 4], values: &[f32]) -> Result<(), String> {
+    let expected = shape.iter().product::<usize>();
+    if values.len() != expected {
+        return Err(format!(
+            "motion data has {} elements, but shape {shape:?} requires {expected}",
+            values.len()
+        ));
+    }
+    let shape_text = format!("({}, {}, {}, {})", shape[0], shape[1], shape[2], shape[3]);
+    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_text}, }}");
+    let padding = (16 - ((10 + header.len() + 1) % 16)) % 16;
+    header.extend(std::iter::repeat_n(' ', padding));
+    header.push('\n');
+    let header_len = u16::try_from(header.len())
+        .map_err(|_| "NumPy header exceeds the v1 size limit".to_owned())?;
+
+    let mut bytes = Vec::with_capacity(10 + header.len() + values.len() * 4);
+    bytes.extend_from_slice(b"\x93NUMPY");
+    bytes.extend_from_slice(&[1, 0]);
+    bytes.extend_from_slice(&header_len.to_le_bytes());
+    bytes.extend_from_slice(header.as_bytes());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fs::write(path, bytes).map_err(|error| format!("could not write {path}: {error}"))
 }
 
 fn compare_forward_with<B: Backend>(args: Vec<String>, device: B::Device) -> ExitCode {
