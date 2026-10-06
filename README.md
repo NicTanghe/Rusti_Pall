@@ -36,6 +36,7 @@ joint-name embeddings supplied as inputs.
 cargo run -- path/to/config.json
 cargo run -- inspect-model path/to/checkpoint.pt path/to/model_manifest.json
 cargo run -- check-weights path/to/config.json path/to/ema_named.pt
+cargo run -- inspect-burn-weights path/to/ema_named.pt
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -56,17 +57,25 @@ and FLAN-T5 are outside the denoiser port.
 The released `.pt` checkpoint stores EMA values as an ordered `shadow_params`
 list, without parameter names. Burn's reader cannot map that list directly.
 Run `scripts/export_ema_state_dict.py` in a Python environment with the
-upstream model dependencies (`torch`, `torch-geometric`, `einops`, and `numpy`)
-to pair each unchanged EMA tensor with the corresponding upstream parameter
-name and convert the pickled NumPy normalization stats to JSON. This is a
-format conversion only; it does not train the model. Then inspect the named
-tensors with:
+upstream model dependencies to pair each unchanged EMA tensor with its
+parameter name and convert the NumPy normalization stats to JSON. On macOS,
+the validated setup is:
 
 ```sh
-python3 scripts/export_ema_state_dict.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r scripts/requirements-export.txt
+.venv/bin/python scripts/export_ema_state_dict.py
+```
+
+This is a format conversion only; it does not train the model. Inspect both
+the upstream and Burn-remapped tensor names with:
+
+```sh
 cargo run --locked -- inspect-weights \
   weights/unimate_uniml3d_f60_v3/ema_named.pt \
   weights/unimate_uniml3d_f60_v3/ema_manifest.json
+cargo run --locked -- inspect-burn-weights \
+  weights/unimate_uniml3d_f60_v3/ema_named.pt
 cargo run --locked -- check-weights \
   weights/unimate_uniml3d_f60_v3/config.json \
   weights/unimate_uniml3d_f60_v3/ema_named.pt

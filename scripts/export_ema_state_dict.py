@@ -2,8 +2,9 @@
 """Name UniMate's positional EMA tensors for the Rust/Burn weight loader.
 
 This is a one-time weight-format conversion; it performs no training and does
-not change tensor values. Run it in an environment with the upstream model's
-Python dependencies installed (torch, torch-geometric, einops, numpy).
+not change tensor values. The minimal validated environment is listed in
+requirements-export.txt; some dependencies are imported transitively by the
+upstream model factory even though this script does not encode text.
 """
 
 from __future__ import annotations

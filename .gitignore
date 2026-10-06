@@ -1,2 +1,4 @@
 /target
 /weights/
+/.venv/
+__pycache__/

@@ -12,7 +12,7 @@ use burn::{
         backend::Backend,
     },
 };
-use burn_store::{ApplyResult, ModuleSnapshot, PytorchStore};
+use burn_store::{ApplyResult, ModuleSnapshot, ModuleStore, PytorchStore};
 use std::path::Path;
 
 /// Per-rig and per-prompt tensors reused throughout ODE integration.
@@ -474,32 +474,7 @@ impl<B: Backend> UniMateDenoiser<B> {
     /// `scripts/export_ema_state_dict.py`. Missing parameters are rejected by
     /// Burn's strict store; extra checkpoint parameters are rejected here.
     pub fn load_ema_weights(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, String> {
-        let mut store = PytorchStore::from_file(path.as_ref().to_path_buf())
-            .map_indices_contiguous(false)
-            // Remap upstream PyTorch names to this Burn module's field names.
-            .with_key_remapping(
-                r"^(input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))\.0\.",
-                "$1.linear_0.",
-            )
-            .with_key_remapping(
-                r"^(input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))\.2\.",
-                "$1.linear_2.",
-            )
-            .with_key_remapping(r"^time_embedder\.mlp\.0\.", "time_embedder.mlp_0.")
-            .with_key_remapping(r"^time_embedder\.mlp\.2\.", "time_embedder.mlp_2.")
-            .with_key_remapping(
-                r"(\.spectral_encoder\.(phi|rho))\.0\.",
-                "$1_0.",
-            )
-            .with_key_remapping(
-                r"(\.spectral_encoder\.(phi|rho))\.2\.",
-                "$1_2.",
-            )
-            .with_key_remapping(r"\.adaLN_modulation\.1\.", ".ada_ln_linear.")
-            .with_key_remapping(
-                r"^(joint_name_embedder|depth_embedding)\.",
-                "token_embeddings.$1.",
-            );
+        let mut store = ema_weight_store(path)?;
         let result = self
             .load_from(&mut store)
             .map_err(|error| format!("could not load EMA weights: {error}"))?;
@@ -511,6 +486,13 @@ impl<B: Backend> UniMateDenoiser<B> {
             ));
         }
         Ok(result)
+    }
+
+    /// Lists checkpoint paths after applying the same key mapping as the EMA loader.
+    pub fn remapped_ema_weight_keys(path: impl AsRef<Path>) -> Result<Vec<String>, String> {
+        ema_weight_store(path)?
+            .keys()
+            .map_err(|error| error.to_string())
     }
 
     /// Samples from a caller-supplied initial Gaussian tensor using UniMate's
@@ -550,6 +532,32 @@ impl<B: Backend> UniMateDenoiser<B> {
             })
         })
     }
+}
+
+fn ema_weight_store(path: impl AsRef<Path>) -> Result<PytorchStore, String> {
+    Ok(PytorchStore::from_file(path.as_ref().to_path_buf())
+        .map_indices_contiguous(false)
+        // Remap upstream PyTorch names to this Burn module's field names.
+        .with_key_remapping(
+            r"^((input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))|(final_layer\.(root_out|joint_out)))\.0\.",
+            "$1.linear_0.",
+        )
+        .with_key_remapping(
+            r"^((input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))|(final_layer\.(root_out|joint_out)))\.2\.",
+            "$1.linear_2.",
+        )
+        .with_key_remapping(r"^time_embedder\.mlp\.0\.", "time_embedder.mlp_0.")
+        .with_key_remapping(r"^time_embedder\.mlp\.2\.", "time_embedder.mlp_2.")
+        .with_key_remapping(
+            r"(\.spectral_encoder\.(phi|rho))\.0\.",
+            "${1}_0.",
+        )
+        .with_key_remapping(
+            r"(\.spectral_encoder\.(phi|rho))\.2\.",
+            "${1}_2.",
+        )
+        .with_key_remapping(r"\.adaLN_modulation\.1\.", ".ada_ln_linear.")
+        .with_key_remapping(r"^(joint_name_embedder|depth_embedding)\.", "token_embeddings.$1."))
 }
 
 #[derive(Module, Debug)]

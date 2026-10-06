@@ -1,0 +1,7 @@
+# Verified on macOS arm64 with Python 3.14 for scripts/export_ema_state_dict.py.
+torch==2.14.1
+numpy==2.2.6
+einops==0.8.2
+torch-geometric==2.7.0
+torchdiffeq==0.2.5
+transformers==5.16.1

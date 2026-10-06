@@ -12,13 +12,36 @@ fn main() -> ExitCode {
         Some("inspect-ema") => inspect_checkpoint(args.collect()),
         Some("inspect-model") => inspect_named_checkpoint(args.collect(), Some("model_state_dict")),
         Some("inspect-weights") => inspect_named_checkpoint(args.collect(), None),
+        Some("inspect-burn-weights") => inspect_burn_weight_keys(args.collect()),
         Some("check-weights") => check_weights(args.collect()),
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+fn inspect_burn_weight_keys(args: Vec<String>) -> ExitCode {
+    let Some(weights_path) = args.first() else {
+        eprintln!("Usage: rusty_uni_pall inspect-burn-weights <ema_named.pt>");
+        return ExitCode::from(2);
+    };
+    match model::UniMateDenoiser::<burn::backend::NdArray<f32>>::remapped_ema_weight_keys(
+        weights_path,
+    ) {
+        Ok(mut keys) => {
+            keys.sort();
+            for key in keys {
+                println!("{key}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Could not inspect remapped weights: {error}");
+            ExitCode::FAILURE
         }
     }
 }
