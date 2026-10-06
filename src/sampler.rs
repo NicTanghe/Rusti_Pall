@@ -191,9 +191,10 @@ where
 }
 
 /// Compose UniMate inference's classifier-free behavior with a velocity
-/// callback. `unconditional=true` requests the zero-caption branch. At scale
-/// 1 the upstream inference CLI samples unconditionally; above 1 it evaluates
-/// both branches and applies `uncond + scale * (cond - uncond)`.
+/// callback. `unconditional=true` requests the zero-caption branch. At scales
+/// up to 1, upstream inference evaluates the conditional branch directly;
+/// above 1 it evaluates both branches and applies
+/// `uncond + scale * (cond - uncond)`.
 pub fn predict_cfg<B, const D: usize, F>(
     state: &Tensor<B, D>,
     time: f32,
@@ -205,7 +206,7 @@ where
     F: FnMut(&Tensor<B, D>, f32, bool) -> Tensor<B, D>,
 {
     if scale <= 1.0 {
-        predict(state, time, true)
+        predict(state, time, false)
     } else {
         let conditional = predict(state, time, false);
         let unconditional = predict(state, time, true);
