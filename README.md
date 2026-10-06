@@ -41,7 +41,7 @@ cargo run -- inspect-model path/to/checkpoint.pt path/to/model_manifest.json
 cargo run -- check-weights path/to/config.json path/to/ema_named.pt
 cargo run -- inspect-burn-weights path/to/ema_named.pt
 cargo run -- compare-forward path/to/config.json path/to/ema_named.pt path/to/fixture.pt
-cargo run -- compare-forward-wgpu path/to/config.json path/to/ema_named.pt path/to/fixture.pt
+cargo run -- compare-forward-cpu path/to/config.json path/to/ema_named.pt path/to/fixture.pt
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -97,11 +97,13 @@ cargo run --locked -- compare-forward \
 ```
 
 The fixture records activations before/after token embedding, after every
-transformer block, and after the final layer. `compare-forward-wgpu` runs the
-same comparison on Burn WGPU; on macOS, Burn selects its Metal adapter. The
-full 71-joint × 60-frame forward has been verified on Metal. If a sandboxed
-process cannot see the adapter, run the command from a normal macOS Terminal
-session with GPU access.
+transformer block, and after the final layer. `compare-forward` uses Burn WGPU
+by default; on macOS, Burn selects its Metal adapter. `compare-forward-metal`
+and `compare-forward-wgpu` are equivalent explicit aliases, while
+`compare-forward-cpu` selects the ndarray backend for diagnostics. The full
+71-joint × 60-frame forward has been verified on Metal. If a sandboxed process
+cannot see the adapter, run the command from a normal macOS Terminal session
+with GPU access.
 
 `sampler::standard_normal_noise` creates reproducible standard-normal initial
 noise on the selected Burn device, and `UniMateDenoiser::sample_dopri5` accepts

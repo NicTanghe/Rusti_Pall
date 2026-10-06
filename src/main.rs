@@ -15,20 +15,23 @@ fn main() -> ExitCode {
         Some("inspect-model") => inspect_named_checkpoint(args.collect(), Some("model_state_dict")),
         Some("inspect-weights") => inspect_named_checkpoint(args.collect(), None),
         Some("inspect-burn-weights") => inspect_burn_weight_keys(args.collect()),
-        Some("compare-forward") => compare_forward(args.collect()),
-        Some("compare-forward-wgpu") => compare_forward_wgpu(args.collect()),
+        Some("compare-forward") | Some("compare-forward-wgpu") => {
+            compare_forward_wgpu(args.collect())
+        }
+        Some("compare-forward-cpu") => compare_forward_cpu(args.collect()),
+        Some("compare-forward-metal") => compare_forward_wgpu(args.collect()),
         Some("check-weights") => check_weights(args.collect()),
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-forward-wgpu <config.json> <ema_named.pt> <fixture.pt>"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>"
             );
             ExitCode::from(2)
         }
     }
 }
 
-fn compare_forward(args: Vec<String>) -> ExitCode {
+fn compare_forward_cpu(args: Vec<String>) -> ExitCode {
     compare_forward_with::<burn::backend::NdArray<f32>>(args, Default::default())
 }
 
