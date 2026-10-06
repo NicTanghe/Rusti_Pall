@@ -27,11 +27,11 @@ joint-name embeddings supplied as inputs.
 - The strict EMA loader maps upstream PyTorch parameter paths into Burn module
   fields and refuses missing or unused tensors. Its name mapping was checked
   against the upstream module paths and checked-in 443-tensor model manifest;
-  the converted 363-tensor EMA loads completely. A deterministic 8-joint,
-  4-frame and a 16-joint, 8-frame PyTorch fixture compare through all ten
-  blocks; their output max absolute errors are `3.0e-5` and `2.6e-5`, with
-  RMSEs `7.5e-6` and `5.1e-6`. Full-shape and ODE parity are still outstanding.
-  No model weights are tracked in Git.
+  the converted 363-tensor EMA loads completely. Deterministic PyTorch
+  fixtures have been compared through all ten blocks at 8 joints × 4 frames,
+  16 × 8, 32 × 16, and the full 71 × 60 checkpoint shape. The full-size
+  WGPU/Metal run completed on the Mac: final output max absolute error
+  `3.98e-5`, RMSE `6.08e-6`. No model weights are tracked in Git.
 
 ## Run
 
@@ -41,6 +41,7 @@ cargo run -- inspect-model path/to/checkpoint.pt path/to/model_manifest.json
 cargo run -- check-weights path/to/config.json path/to/ema_named.pt
 cargo run -- inspect-burn-weights path/to/ema_named.pt
 cargo run -- compare-forward path/to/config.json path/to/ema_named.pt path/to/fixture.pt
+cargo run -- compare-forward-wgpu path/to/config.json path/to/ema_named.pt path/to/fixture.pt
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -97,9 +98,10 @@ cargo run --locked -- compare-forward \
 
 The fixture records activations before/after token embedding, after every
 transformer block, and after the final layer. `compare-forward-wgpu` runs the
-same comparison on Burn WGPU/Metal when a GPU adapter is available. This
-environment did not expose a Metal adapter, and its full-size CPU forward was
-too slow for a practical comparison.
+same comparison on Burn WGPU; on macOS, Burn selects its Metal adapter. The
+full 71-joint × 60-frame forward has been verified on Metal. If a sandboxed
+process cannot see the adapter, run the command from a normal macOS Terminal
+session with GPU access.
 
 `sampler::standard_normal_noise` creates reproducible standard-normal initial
 noise on the selected Burn device, and `UniMateDenoiser::sample_dopri5` accepts
