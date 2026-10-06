@@ -22,6 +22,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=7419)
     parser.add_argument("--joints", type=int, default=8, help="reduced shape for fast parity checks")
     parser.add_argument("--frames", type=int, default=4, help="reduced shape for fast parity checks")
+    parser.add_argument(
+        "--include-sample",
+        action="store_true",
+        help="also record a torchdiffeq flow sample for the Rust sampler comparison",
+    )
+    parser.add_argument("--cfg-scale", type=float, default=3.0)
     args = parser.parse_args()
 
     sys.path.insert(0, str(args.source.resolve()))
@@ -113,6 +119,31 @@ def main() -> int:
         values["expected"] = model(
             values["motion"], values["timesteps"], cond=condition, force_mask=False
         ).contiguous()
+        if args.include_sample:
+            from unimate.models.factory import create_transport
+            from unimate.models.flow.transport import Sampler
+
+            class GuidedModel(torch.nn.Module):
+                def __init__(self, denoiser, scale):
+                    super().__init__()
+                    self.denoiser = denoiser
+                    self.scale = scale
+
+                def forward(self, state, time, cond=None):
+                    conditional = self.denoiser(state, time, cond=cond)
+                    if self.scale <= 1.0:
+                        return conditional
+                    unconditional = self.denoiser(
+                        state, time, cond=cond, force_mask=True
+                    )
+                    return unconditional + self.scale * (conditional - unconditional)
+
+            noise = normal((batch, joints, feature_len, frames))
+            transport = create_transport(training_config=config.training)
+            sample_fn = Sampler(transport).sample_ode(num_steps=50)
+            samples = sample_fn(noise, GuidedModel(model, args.cfg_scale), cond=condition)
+            values["initial_noise"] = noise
+            values["expected_sample"] = samples[-1].contiguous()
     values.update(trace)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

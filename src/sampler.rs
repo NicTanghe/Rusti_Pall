@@ -175,26 +175,17 @@ where
         // stages k2 through k7 account for six new evaluations.
         stats.evaluations += 6;
 
-        let fourth = combine(
-            &state,
-            h,
-            &[
-                (&k1, 5179.0 / 57600.0),
-                (&k3, 7571.0 / 16695.0),
-                (&k4, 393.0 / 640.0),
-                (&k5, -92097.0 / 339200.0),
-                (&k6, 187.0 / 2100.0),
-                (&k7, 1.0 / 40.0),
-            ],
-        );
         let scale = state.clone().abs().max_pair(fifth.clone().abs()) * rtol + atol;
-        let normalized_error = (fifth.clone() - fourth) / scale;
-        let error_squared = normalized_error.square().mean();
-        let error = error_squared
-            .into_data()
-            .to_vec::<f32>()
-            .map_err(|e| format!("could not read adaptive error estimate: {e}"))?[0]
-            .sqrt();
+        // Use torchdiffeq's Dormand-Prince embedded error coefficients rather
+        // than subtracting separately accumulated fourth- and fifth-order
+        // estimates; this follows its error path and avoids extra rounding.
+        let error_estimate = k1.clone() * (h * (35.0 / 384.0 - 1951.0 / 21600.0))
+            + k3.clone() * (h * (500.0 / 1113.0 - 22642.0 / 50085.0))
+            + k4.clone() * (h * (125.0 / 192.0 - 451.0 / 720.0))
+            + k5.clone() * (h * (-2187.0 / 6784.0 + 12231.0 / 42400.0))
+            + k6.clone() * (h * (11.0 / 84.0 - 649.0 / 6300.0))
+            + k7.clone() * (h * (-1.0 / 60.0));
+        let error = tensor_rms(error_estimate / scale)?;
 
         let factor = if error == 0.0 {
             10.0

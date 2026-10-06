@@ -31,7 +31,10 @@ joint-name embeddings supplied as inputs.
   fixtures have been compared through all ten blocks at 8 joints × 4 frames,
   16 × 8, 32 × 16, and the full 71 × 60 checkpoint shape. The full-size
   WGPU/Metal run completed on the Mac: final output max absolute error
-  `3.98e-5`, RMSE `6.08e-6`. No model weights are tracked in Git.
+  `3.98e-5`, RMSE `6.08e-6`. The adaptive sampler has also been compared with
+  torchdiffeq on an 8-joint × 4-frame fixture at CFG scales 1 and 3; RMSEs were
+  `3.58e-4` and `2.22e-3` respectively (the CFG 3 reference output RMS is
+  `12.73`). No model weights are tracked in Git.
 
 ## Run
 
@@ -94,6 +97,15 @@ cargo run --locked -- compare-forward \
   weights/unimate_uniml3d_f60_v3/forward_fixture.config.json \
   weights/unimate_uniml3d_f60_v3/ema_named.pt \
   weights/unimate_uniml3d_f60_v3/forward_fixture.pt
+
+# Include the upstream torchdiffeq result to compare complete sampling.
+.venv/bin/python scripts/make_reference_fixture.py \
+  --joints 8 --frames 4 --include-sample --cfg-scale 3.0 \
+  --output weights/unimate_uniml3d_f60_v3/sampling_fixture.pt
+cargo run --locked -- compare-sample \
+  weights/unimate_uniml3d_f60_v3/sampling_fixture.config.json \
+  weights/unimate_uniml3d_f60_v3/ema_named.pt \
+  weights/unimate_uniml3d_f60_v3/sampling_fixture.pt 3.0
 ```
 
 The fixture records activations before/after token embedding, after every
@@ -110,10 +122,10 @@ noise on the selected Burn device, and `UniMateDenoiser::sample_dopri5` accepts
 that noise plus precomputed conditioning tensors from an asset-preparation
 step. Burn seeding is backend-wide for the selected device; pass a saved noise
 tensor when comparing backends. A user-facing rig/prompt preparation and
-motion-file output path is not implemented yet. The Rust adaptive controller
-follows the Dormand-Prince 5(4) tableau and tolerances, but is not guaranteed to
-take the same internal steps as torchdiffeq. End-to-end ODE parity remains
-unverified.
+motion-file output path is not implemented yet. Rust uses the Dormand-Prince
+5(4) tableau, torchdiffeq-style initial-step selection, and the released
+tolerances. Reduced-shape end-to-end samples are close; full-shape ODE parity
+and asset-to-animation output remain outstanding.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.

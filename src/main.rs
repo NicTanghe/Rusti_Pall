@@ -20,11 +20,12 @@ fn main() -> ExitCode {
         }
         Some("compare-forward-cpu") => compare_forward_cpu(args.collect()),
         Some("compare-forward-metal") => compare_forward_wgpu(args.collect()),
+        Some("compare-sample") => compare_sample_wgpu(args.collect()),
         Some("check-weights") => check_weights(args.collect()),
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)"
             );
             ExitCode::from(2)
         }
@@ -37,6 +38,75 @@ fn compare_forward_cpu(args: Vec<String>) -> ExitCode {
 
 fn compare_forward_wgpu(args: Vec<String>) -> ExitCode {
     compare_forward_with::<burn::backend::Wgpu>(args, burn::backend::wgpu::WgpuDevice::default())
+}
+
+fn compare_sample_wgpu(args: Vec<String>) -> ExitCode {
+    compare_sample_with::<burn::backend::Wgpu>(args, burn::backend::wgpu::WgpuDevice::default())
+}
+
+fn compare_sample_with<B: Backend>(args: Vec<String>, device: B::Device) -> ExitCode {
+    let (Some(config_path), Some(weights_path), Some(fixture_path)) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        eprintln!(
+            "Usage: rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]"
+        );
+        return ExitCode::from(2);
+    };
+    let cfg_scale = args
+        .get(3)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3.0);
+
+    let result = fs::read_to_string(config_path)
+        .map_err(anyhow_io)
+        .and_then(|contents| {
+            serde_json::from_str::<unimate::UniMateConfig>(&contents).map_err(|e| e.to_string())
+        })
+        .and_then(|config| {
+            let mut model = model::UniMateDenoiser::<B>::from_config(&config, &device)?;
+            model.load_ema_weights(weights_path)?;
+            let reader = PytorchReader::new(fixture_path)
+                .map_err(|error| format!("could not open sampling fixture: {error}"))?;
+            let condition = model::DenoiserCondition {
+                caption_embedding: fixture_f32::<2, B>(&reader, "caption_embedding", &device)?,
+                tpos_first_frame: fixture_f32::<3, B>(&reader, "tpos_first_frame", &device)?,
+                tpos_first_frame_parents: fixture_f32::<3, B>(
+                    &reader,
+                    "tpos_first_frame_parents",
+                    &device,
+                )?,
+                n_joints: fixture_int::<1, B>(&reader, "n_joints", &device)?,
+                motion_lengths: fixture_int::<1, B>(&reader, "motion_lengths", &device)?,
+                joint_names_emb: fixture_f32::<3, B>(&reader, "joint_names_emb", &device)?,
+                joint_depths: fixture_int::<2, B>(&reader, "joint_depths", &device)?,
+                graph_dist: fixture_int::<3, B>(&reader, "graph_dist", &device)?,
+                joint_relations: fixture_int::<3, B>(&reader, "joint_relations", &device)?,
+                spectral_coords: fixture_f32::<3, B>(&reader, "spectral_coords", &device)?,
+            };
+            let initial_noise = fixture_f32::<4, B>(&reader, "initial_noise", &device)?;
+            let expected = fixture_f32::<4, B>(&reader, "expected_sample", &device)?;
+            let (actual, stats) = model.sample_dopri5(initial_noise, &condition, cfg_scale)?;
+            let metrics = tensor_metrics(expected, actual)?;
+            Ok((metrics, stats))
+        });
+
+    match result {
+        Ok(((max_absolute, max_relative, rmse), stats)) => {
+            println!(
+                "sample: max_abs={max_absolute:.8e}, max_rel={max_relative:.8e}, rmse={rmse:.8e}"
+            );
+            println!(
+                "ODE evaluations={}, accepted_steps={}, rejected_steps={}",
+                stats.evaluations, stats.accepted_steps, stats.rejected_steps
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Could not compare flow samples: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn compare_forward_with<B: Backend>(args: Vec<String>, device: B::Device) -> ExitCode {
