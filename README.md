@@ -5,6 +5,9 @@ This crate is the start of an inference-only Burn port of UniMate's released
 runtime target is the resolved UniMate config and EMA weights, with prompt and
 joint-name embeddings supplied as inputs.
 
+See [PORT_ROADMAP.md](PORT_ROADMAP.md) for verified milestones and the remaining
+work to get from a real rig and prompt to an animation.
+
 ## Current status
 
 - Burn 0.20.1 is pinned for the ndarray CPU and WGPU (Metal on macOS) backends.
