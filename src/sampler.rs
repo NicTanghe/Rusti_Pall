@@ -81,16 +81,41 @@ where
     }
 
     let mut t = start;
-    let mut h = (end - start) / (output_points - 1) as f32;
     let mut stats = IntegrationStats::default();
     const MAX_STEPS: usize = 10_000;
+
+    // Match torchdiffeq's Hairer-style initial-step selection. The requested
+    // output grid controls returned samples there; this sampler only returns
+    // the endpoint, so its count is validation metadata rather than a fixed
+    // internal step size.
+    let first_velocity = velocity(&state, t);
+    stats.evaluations += 1;
+    let scale = state.clone().abs() * rtol + atol;
+    let d0 = tensor_rms(state.clone() / scale.clone())?;
+    let d1 = tensor_rms(first_velocity.clone() / scale.clone())?;
+    let h0 = if d0 < 1e-5 || d1 < 1e-5 {
+        1e-6
+    } else {
+        0.01 * d0 / d1
+    };
+    let probe_state = state.clone() + first_velocity.clone() * h0;
+    let probe_velocity = velocity(&probe_state, t + h0);
+    stats.evaluations += 1;
+    let d2 = tensor_rms((probe_velocity - first_velocity.clone()) / scale)? / h0;
+    let h1 = if d1 <= 1e-15 && d2 <= 1e-15 {
+        1e-6_f32.max(h0 * 1e-3)
+    } else {
+        (0.01 / d1.max(d2)).powf(0.2)
+    };
+    let mut h = (100.0 * h0).min(h1).min(end - start);
+    let mut start_velocity = first_velocity;
 
     while t < end {
         if stats.accepted_steps + stats.rejected_steps >= MAX_STEPS {
             return Err("Dormand-Prince exceeded 10,000 attempted steps".into());
         }
         h = h.min(end - t);
-        let k1 = velocity(&state, t);
+        let k1 = start_velocity.clone();
         let k2 = velocity(
             &combine(&state, h, &[(&k1, 1.0 / 5.0)]),
             t + h * (1.0 / 5.0),
@@ -146,7 +171,9 @@ where
             ],
         );
         let k7 = velocity(&fifth, t + h);
-        stats.evaluations += 7;
+        // k1 is reused from initialization or the previous accepted step;
+        // stages k2 through k7 account for six new evaluations.
+        stats.evaluations += 6;
 
         let fourth = combine(
             &state,
@@ -178,6 +205,7 @@ where
             state = fifth;
             t += h;
             stats.accepted_steps += 1;
+            start_velocity = k7;
         } else {
             stats.rejected_steps += 1;
         }
@@ -188,6 +216,16 @@ where
     }
 
     Ok((state, stats))
+}
+
+fn tensor_rms<B: Backend, const D: usize>(value: Tensor<B, D>) -> Result<f32, String> {
+    value
+        .square()
+        .mean()
+        .into_data()
+        .to_vec::<f32>()
+        .map(|values| values[0].sqrt())
+        .map_err(|error| format!("could not read adaptive error estimate: {error}"))
 }
 
 /// Compose UniMate inference's classifier-free behavior with a velocity
