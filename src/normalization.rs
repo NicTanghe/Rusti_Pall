@@ -27,8 +27,16 @@ impl NormalizationStats {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-        let stats: Self = serde_json::from_str(&contents)
+        let value: serde_json::Value = serde_json::from_str(&contents)
             .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+        // The checkpoint exporter writes the upstream dataset-type map
+        // directly. Also accept a wrapped form for callers that package
+        // several normalization assets together.
+        let datasets = value.get("datasets").cloned().unwrap_or(value);
+        let stats = Self {
+            datasets: serde_json::from_value(datasets)
+                .map_err(|error| format!("could not parse {}: {error}", path.display()))?,
+        };
         if stats.datasets.is_empty() {
             return Err("normalization file contains no dataset entries".to_owned());
         }

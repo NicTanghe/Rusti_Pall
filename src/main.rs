@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)\n  rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale]  (WGPU; Metal on macOS)"
+                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)\n  rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale] [stats.json dataset_type]  (WGPU; Metal on macOS)"
             );
             ExitCode::from(2)
         }
@@ -124,6 +124,12 @@ fn sample_wgpu(args: Vec<String>) -> ExitCode {
         .and_then(|value| value.parse().ok())
         .unwrap_or(10);
     let requested_scale = args.get(5).and_then(|value| value.parse().ok());
+    let stats_path = args.get(6);
+    let stats_dataset = args.get(7);
+    if stats_path.is_some() != stats_dataset.is_some() {
+        eprintln!("Pass both stats.json and dataset_type to denormalize the output");
+        return ExitCode::from(2);
+    }
     let device = burn::backend::wgpu::WgpuDevice::default();
 
     let result = fs::read_to_string(config_path)
@@ -194,10 +200,34 @@ fn sample_wgpu(args: Vec<String>) -> ExitCode {
                 &device,
             );
             let (sample, stats) = model.sample_dopri5(initial_noise, &condition, cfg_scale)?;
-            let values = sample
+            let mut values = sample
                 .into_data()
                 .to_vec::<f32>()
                 .map_err(|error| format!("could not read generated motion: {error}"))?;
+            if let (Some(stats_path), Some(dataset_type)) = (stats_path, stats_dataset) {
+                if config.dataset.feature_len != 12 {
+                    return Err("motion denormalization currently expects 12 features".into());
+                }
+                let stats = normalization::NormalizationStats::from_json(stats_path)?;
+                let joints = config.dataset.max_joints;
+                let features = config.dataset.feature_len;
+                let frames = config.dataset.max_motion_length;
+                for batch_index in 0..batch {
+                    for joint_index in 0..joints {
+                        let joint_stats = stats.for_joint::<12>(dataset_type, joint_index)?;
+                        for feature_index in 0..features {
+                            for frame_index in 0..frames {
+                                let index = (((batch_index * joints + joint_index) * features
+                                    + feature_index)
+                                    * frames)
+                                    + frame_index;
+                                values[index] = values[index] * joint_stats.std[feature_index]
+                                    + joint_stats.mean[feature_index];
+                            }
+                        }
+                    }
+                }
+            }
             write_npy_f32(
                 output_path,
                 [
@@ -213,7 +243,12 @@ fn sample_wgpu(args: Vec<String>) -> ExitCode {
 
     match result {
         Ok(stats) => {
-            println!("Wrote normalized motion samples to {output_path}");
+            let representation = if stats_path.is_some() {
+                "denormalized"
+            } else {
+                "normalized"
+            };
+            println!("Wrote {representation} motion samples to {output_path}");
             println!(
                 "ODE evaluations={}, accepted_steps={}, rejected_steps={}",
                 stats.evaluations, stats.accepted_steps, stats.rejected_steps

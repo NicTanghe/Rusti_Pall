@@ -49,7 +49,7 @@ cargo run -- check-weights path/to/config.json path/to/ema_named.pt
 cargo run -- inspect-burn-weights path/to/ema_named.pt
 cargo run -- compare-forward path/to/config.json path/to/ema_named.pt path/to/fixture.pt
 cargo run -- compare-forward-cpu path/to/config.json path/to/ema_named.pt path/to/fixture.pt
-cargo run -- sample path/to/config.json path/to/ema_named.pt conditioning.pt motion.npy [seed] [cfg_scale]
+cargo run -- sample path/to/config.json path/to/ema_named.pt conditioning.pt motion.npy [seed] [cfg_scale] [stats.json dataset_type]
 ```
 
 Use the `config.json` written beside the checkpoint, since UniMate resolves
@@ -117,7 +117,8 @@ cargo run --locked -- sample \
   weights/unimate_uniml3d_f60_v3/sampling_fixture.config.json \
   weights/unimate_uniml3d_f60_v3/ema_named.pt \
   weights/unimate_uniml3d_f60_v3/sampling_fixture.pt \
-  weights/unimate_uniml3d_f60_v3/motion.npy 10 3.0
+  weights/unimate_uniml3d_f60_v3/motion.npy 10 3.0 \
+  weights/unimate_uniml3d_f60_v3/dataset_stats.json objaverse
 ```
 
 The fixture records activations before/after token embedding, after every
@@ -130,15 +131,17 @@ cannot see the adapter, run the command from a normal macOS Terminal session
 with GPU access.
 
 `sample` runs the full Burn flow sampler on WGPU (Metal on macOS), creates
-seeded initial Gaussian noise, and writes normalized feature values as a
-float32 NumPy array with shape `[batch, joints, features, frames]`. Its input
+seeded initial Gaussian noise, and writes feature values as a float32 NumPy
+array with shape `[batch, joints, features, frames]`. Pass both `stats.json`
+and a dataset type (`truebones`, `mixamo`, or `objaverse`) to inverse-normalize
+the output; without them it remains normalized. Its input
 `conditioning.pt` is a PyTorch tensor dictionary containing `caption_embedding`
 `[B,768]`, `tpos_first_frame` and `tpos_first_frame_parents` `[B,J,12]`,
 `n_joints` and `motion_lengths` `[B]`, `joint_names_emb` `[B,J,768]`,
 `joint_depths` `[B,J]`, `graph_dist` and `joint_relations` `[B,J,J]`, and
 `spectral_coords` `[B,J,max_freqs]`. Text embeddings and rig features must
 already be prepared; the standard rig/prompt-to-conditioning preparation and
-denormalization/animation export are still outstanding. Burn seeding is
+rig-to-animation reconstruction/export are still outstanding. Burn seeding is
 backend-wide, so pass the same saved noise tensor when comparing backends.
 Rust uses the Dormand-Prince 5(4) tableau, torchdiffeq-style initial-step
 selection, and the released tolerances. Reduced-shape end-to-end samples are
