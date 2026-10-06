@@ -9,6 +9,8 @@ joint-name embeddings supplied as inputs.
 
 - Burn 0.20.1 is pinned for the ndarray CPU and WGPU (Metal on macOS) backends.
 - The CLI parses and validates a resolved UniMate JSON config.
+- `sample` runs seeded flow inference on WGPU (Metal on macOS) and writes
+  normalized float32 NumPy motion output.
 - Flow sampling supports adaptive Dormand-Prince 5(4) integration with the
   upstream `atol=1e-6`, `rtol=1e-3`, 50 requested points, and sequential CFG.
   Fixed-step Euler remains available for preview and editing workflows.
@@ -34,7 +36,9 @@ joint-name embeddings supplied as inputs.
   `3.98e-5`, RMSE `6.08e-6`. The adaptive sampler has also been compared with
   torchdiffeq on an 8-joint × 4-frame fixture at CFG scales 1 and 3; RMSEs were
   `3.58e-4` and `2.22e-3` respectively (the CFG 3 reference output RMS is
-  `12.73`). No model weights are tracked in Git.
+  `12.73`). A full-size Metal sample also completed at 71 joints × 60 frames
+  in 56 ODE evaluations and produced finite output. Full-shape PyTorch sample
+  parity remains to be measured. No model weights are tracked in Git.
 
 ## Run
 
@@ -138,7 +142,8 @@ denormalization/animation export are still outstanding. Burn seeding is
 backend-wide, so pass the same saved noise tensor when comparing backends.
 Rust uses the Dormand-Prince 5(4) tableau, torchdiffeq-style initial-step
 selection, and the released tolerances. Reduced-shape end-to-end samples are
-close; full-shape ODE parity and asset-to-animation output remain outstanding.
+close; full-shape ODE parity against PyTorch and asset-to-animation output
+remain outstanding.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.
