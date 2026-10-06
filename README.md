@@ -1,4 +1,4 @@
-# UniMate Rust inference port
+# rusty_pall — UniMate Rust inference port
 
 This crate is the start of an inference-only Burn port of UniMate's released
 `graph` + `adaln` flow model. It does not train or alter weights. The initial

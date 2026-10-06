@@ -1,5 +1,5 @@
 [package]
-name = "rusty_uni_pall"
+name = "rusty_pall"
 version = "0.1.0"
 edition = "2024"
 

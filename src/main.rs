@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_uni_pall <resolved-config.json>\n  rusty_uni_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_uni_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_uni_pall inspect-burn-weights <ema_named.pt>\n  rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_uni_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)\n  rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale] [stats.json dataset_type]  (WGPU; Metal on macOS)"
+                "Usage:\n  rusty_pall <resolved-config.json>\n  rusty_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_pall inspect-burn-weights <ema_named.pt>\n  rusty_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (WGPU; Metal on macOS)\n  rusty_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (WGPU; Metal on macOS)\n  rusty_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale] [stats.json dataset_type]  (WGPU; Metal on macOS)"
             );
             ExitCode::from(2)
         }
@@ -50,7 +50,7 @@ fn compare_sample_with<B: Backend>(args: Vec<String>, device: B::Device) -> Exit
         (args.first(), args.get(1), args.get(2))
     else {
         eprintln!(
-            "Usage: rusty_uni_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]"
+            "Usage: rusty_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]"
         );
         return ExitCode::from(2);
     };
@@ -115,7 +115,7 @@ fn sample_wgpu(args: Vec<String>) -> ExitCode {
         (args.first(), args.get(1), args.get(2), args.get(3))
     else {
         eprintln!(
-            "Usage: rusty_uni_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale]"
+            "Usage: rusty_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale]"
         );
         return ExitCode::from(2);
     };
@@ -293,9 +293,7 @@ fn compare_forward_with<B: Backend>(args: Vec<String>, device: B::Device) -> Exi
     let (Some(config_path), Some(weights_path), Some(fixture_path)) =
         (args.first(), args.get(1), args.get(2))
     else {
-        eprintln!(
-            "Usage: rusty_uni_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>"
-        );
+        eprintln!("Usage: rusty_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>");
         return ExitCode::from(2);
     };
 
@@ -447,7 +445,7 @@ fn fixture_int<const D: usize, B: burn::tensor::backend::Backend>(
 
 fn inspect_burn_weight_keys(args: Vec<String>) -> ExitCode {
     let Some(weights_path) = args.first() else {
-        eprintln!("Usage: rusty_uni_pall inspect-burn-weights <ema_named.pt>");
+        eprintln!("Usage: rusty_pall inspect-burn-weights <ema_named.pt>");
         return ExitCode::from(2);
     };
     match model::UniMateDenoiser::<burn::backend::NdArray<f32>>::remapped_ema_weight_keys(
@@ -469,7 +467,7 @@ fn inspect_burn_weight_keys(args: Vec<String>) -> ExitCode {
 
 fn check_weights(args: Vec<String>) -> ExitCode {
     let (Some(config_path), Some(weights_path)) = (args.first(), args.get(1)) else {
-        eprintln!("Usage: rusty_uni_pall check-weights <resolved-config.json> <ema_named.pt>");
+        eprintln!("Usage: rusty_pall check-weights <resolved-config.json> <ema_named.pt>");
         return ExitCode::from(2);
     };
     let result = fs::read_to_string(config_path)
@@ -500,7 +498,7 @@ fn check_weights(args: Vec<String>) -> ExitCode {
 
 fn inspect_checkpoint(args: Vec<String>) -> ExitCode {
     let Some(checkpoint_path) = args.first() else {
-        eprintln!("Usage: rusty_uni_pall inspect-ema <checkpoint.pt> [manifest.json]");
+        eprintln!("Usage: rusty_pall inspect-ema <checkpoint.pt> [manifest.json]");
         return ExitCode::from(2);
     };
 
