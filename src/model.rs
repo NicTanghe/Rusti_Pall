@@ -343,6 +343,8 @@ pub struct UniMateDenoiser<B: Backend> {
     pub input_layer: InputLayer<B>,
     pub tpos_pool: TposPool<B>,
     pub token_embeddings: TokenEmbeddings<B>,
+    /// Upstream shares this SignNet encoder across every transformer block.
+    pub rope_j: SpectralJointRoPE<B>,
     pub transformer_blocks: Vec<SpatioTemporalBlock<B>>,
     pub final_layer: FinalLayer<B>,
     max_motion_length: usize,
@@ -392,11 +394,7 @@ impl<B: Backend> UniMateDenoiser<B> {
     ) -> Self {
         let max_frames = max_motion_length + 1;
         let transformer_blocks = (0..num_layers)
-            .map(|_| {
-                SpatioTemporalBlock::new(
-                    latent_dim, ff_size, num_heads, max_freqs, max_frames, device,
-                )
-            })
+            .map(|_| SpatioTemporalBlock::new(latent_dim, ff_size, num_heads, max_frames, device))
             .collect();
         Self {
             time_embedder: TimestepEmbedder::new(latent_dim, device),
@@ -404,6 +402,7 @@ impl<B: Backend> UniMateDenoiser<B> {
             input_layer: InputLayer::new(feature_len, latent_dim, max_joints, device),
             tpos_pool: TposPool::new(latent_dim, num_tpos_queries, device),
             token_embeddings: TokenEmbeddings::new(text_dim, latent_dim, max_depth, device),
+            rope_j: SpectralJointRoPE::new(latent_dim / num_heads, max_freqs, device),
             transformer_blocks,
             final_layer: FinalLayer::new(latent_dim, feature_len, max_joints, device),
             max_motion_length,
@@ -462,6 +461,7 @@ impl<B: Backend> UniMateDenoiser<B> {
                 joint_relations.clone(),
                 valid_joints.clone(),
                 spectral_coords.clone(),
+                &self.rope_j,
             );
         }
         self.final_layer
@@ -476,17 +476,30 @@ impl<B: Backend> UniMateDenoiser<B> {
     pub fn load_ema_weights(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, String> {
         let mut store = PytorchStore::from_file(path.as_ref().to_path_buf())
             .map_indices_contiguous(false)
-            // Sequential PyTorch modules retain indices 0 and 2 around SiLU.
-            .with_key_remapping(r"\.linear_0\.", ".0.")
-            .with_key_remapping(r"\.linear_2\.", ".2.")
-            .with_key_remapping(r"\.mlp_0\.", ".mlp.0.")
-            .with_key_remapping(r"\.mlp_2\.", ".mlp.2.")
-            .with_key_remapping(r"\.phi_0\.", ".phi.0.")
-            .with_key_remapping(r"\.phi_2\.", ".phi.2.")
-            .with_key_remapping(r"\.rho_0\.", ".rho.0.")
-            .with_key_remapping(r"\.rho_2\.", ".rho.2.")
-            .with_key_remapping(r"\.ada_ln_linear\.", ".adaLN_modulation.1.")
-            .with_key_remapping(r"^token_embeddings\.", "");
+            // Remap upstream PyTorch names to this Burn module's field names.
+            .with_key_remapping(
+                r"^(input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))\.0\.",
+                "$1.linear_0.",
+            )
+            .with_key_remapping(
+                r"^(input_layer\.(root_tpos_embedder|root_x_embedder|joint_tpos_embedder|parent_tpos_embedder|tpos_fuse|joint_x_embedder))\.2\.",
+                "$1.linear_2.",
+            )
+            .with_key_remapping(r"^time_embedder\.mlp\.0\.", "time_embedder.mlp_0.")
+            .with_key_remapping(r"^time_embedder\.mlp\.2\.", "time_embedder.mlp_2.")
+            .with_key_remapping(
+                r"(\.spectral_encoder\.(phi|rho))\.0\.",
+                "$1_0.",
+            )
+            .with_key_remapping(
+                r"(\.spectral_encoder\.(phi|rho))\.2\.",
+                "$1_2.",
+            )
+            .with_key_remapping(r"\.adaLN_modulation\.1\.", ".ada_ln_linear.")
+            .with_key_remapping(
+                r"^(joint_name_embedder|depth_embedding)\.",
+                "token_embeddings.$1.",
+            );
         let result = self
             .load_from(&mut store)
             .map_err(|error| format!("could not load EMA weights: {error}"))?;
@@ -578,7 +591,6 @@ pub struct SpatialGraphSelfAttention<B: Backend> {
     pub proj: Linear<B>,
     pub q_norm: LlamaRmsNorm<B>,
     pub k_norm: LlamaRmsNorm<B>,
-    pub rope: SpectralJointRoPE<B>,
     pub graph_dist_embedding: Embedding<B>,
     pub graph_dist_proj: Linear<B>,
     pub graph_dist_scale: Param<Tensor<B, 1>>,
@@ -592,7 +604,7 @@ pub struct SpatialGraphSelfAttention<B: Backend> {
 }
 
 impl<B: Backend> SpatialGraphSelfAttention<B> {
-    pub fn new(width: usize, heads: usize, max_freqs: usize, device: &B::Device) -> Self {
+    pub fn new(width: usize, heads: usize, device: &B::Device) -> Self {
         assert!(heads > 0 && width % heads == 0);
         let head_dim = width / heads;
         let graph_feature_dim = width / 4;
@@ -602,7 +614,6 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
             proj: LinearConfig::new(width, width).init(device),
             q_norm: LlamaRmsNorm::new(head_dim, device),
             k_norm: LlamaRmsNorm::new(head_dim, device),
-            rope: SpectralJointRoPE::new(head_dim, max_freqs, device),
             graph_dist_embedding: EmbeddingConfig::new(6, graph_feature_dim).init(device),
             graph_dist_proj: LinearConfig::new(graph_feature_dim, heads).init(device),
             graph_dist_scale: scale_init.init([1], device),
@@ -624,6 +635,7 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
         joint_relations: Tensor<B, 3, burn::tensor::Int>,
         valid_joints: Tensor<B, 2, burn::tensor::Bool>,
         spectral_coords: Tensor<B, 3>,
+        rope: &SpectralJointRoPE<B>,
     ) -> Tensor<B, 4> {
         let [batch, frames, joints, width] = input.dims();
         let pair_count = joints * joints;
@@ -654,7 +666,7 @@ impl<B: Backend> SpatialGraphSelfAttention<B> {
         let query = self.q_norm.forward(to_heads(qkv[0].clone()));
         let key = self.k_norm.forward(to_heads(qkv[1].clone()));
         let value = to_heads(qkv[2].clone());
-        let (query, key) = self.rope.forward_per_frame(query, key, spectral_coords);
+        let (query, key) = rope.forward_per_frame(query, key, spectral_coords);
 
         let weights =
             (query.matmul(key.swap_dims(3, 4)) * self.scale) + graph_bias.unsqueeze_dim::<5>(1);
@@ -853,13 +865,12 @@ impl<B: Backend> SpatioTemporalBlock<B> {
         width: usize,
         ff_size: usize,
         heads: usize,
-        max_freqs: usize,
         max_frames: usize,
         device: &B::Device,
     ) -> Self {
         Self {
             norm_s: LlamaRmsNorm::new(width, device),
-            s_attn: SpatialGraphSelfAttention::new(width, heads, max_freqs, device),
+            s_attn: SpatialGraphSelfAttention::new(width, heads, device),
             norm_t: LlamaRmsNorm::new(width, device),
             t_attn: TemporalSelfAttention::new(width, heads, max_frames, device),
             norm_mlp: LlamaRmsNorm::new(width, device),
@@ -879,6 +890,7 @@ impl<B: Backend> SpatioTemporalBlock<B> {
         joint_relations: Tensor<B, 3, burn::tensor::Int>,
         valid_joints: Tensor<B, 2, burn::tensor::Bool>,
         spectral_coords: Tensor<B, 3>,
+        rope: &SpectralJointRoPE<B>,
     ) -> Tensor<B, 4> {
         let [batch, _, _, width] = x.dims();
         assert_eq!(width, self.width, "transformer block width mismatch");
@@ -895,6 +907,7 @@ impl<B: Backend> SpatioTemporalBlock<B> {
             joint_relations,
             valid_joints,
             spectral_coords,
+            rope,
         );
         let x = x + expand(2) * spatial;
 

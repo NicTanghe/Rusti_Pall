@@ -22,10 +22,13 @@ joint-name embeddings supplied as inputs.
   temporal self-attention, the graph/adaLN spatiotemporal block, flow-time
   embedding, root/joint input embedding, t-pose conditioning pool, depth/name
   token embeddings, final root/joint output layer, and the assembled denoiser
-  forward pass.
-- A strict EMA loader maps the converted PyTorch parameter names to the Burn
-  module names and refuses missing or unused tensors. Numerical parity against
-  PyTorch is still unverified. No model weights are tracked in Git.
+  forward pass. The spectral joint RoPE encoder is shared across blocks, as in
+  the upstream architecture.
+- The strict EMA loader maps upstream PyTorch parameter paths into Burn module
+  fields and refuses missing or unused tensors. Its name mapping was checked
+  against the upstream module paths and checked-in 443-tensor model manifest;
+  an actual EMA load and numerical parity check still require the named EMA
+  conversion and PyTorch reference. No model weights are tracked in Git.
 
 ## Run
 
