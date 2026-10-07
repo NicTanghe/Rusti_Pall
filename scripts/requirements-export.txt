@@ -1,6 +1,8 @@
-# Verified on macOS arm64 with Python 3.14 for scripts/export_ema_state_dict.py.
+# Dependencies for weight conversion and PyTorch reference fixtures.
 torch==2.14.1
-numpy==2.2.6
+numpy==2.2.6; python_version < "3.14"
+# NumPy 2.3.3 adds Python 3.14 wheels.
+numpy==2.3.3; python_version >= "3.14"
 einops==0.8.2
 torch-geometric==2.7.0
 torchdiffeq==0.2.5

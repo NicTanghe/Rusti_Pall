@@ -62,6 +62,53 @@ that enable the optional GCN graph embedding.
 
 ## Required inference assets
 
+For a complete local setup (Python environment, upstream imports, downloaded
+assets, EMA conversion, and Rust weight-loading check), run:
+
+```sh
+bash scripts/setup_environment.sh
+source .venv/bin/activate
+python -c 'from unimate.models.factory import create_model'
+```
+
+The Python import is `unimate`. Its pinned source already lives in
+`reference/UniMate`; setup registers that directory in this virtual environment
+without copying it or modifying the system Python installation. On Linux,
+setup installs CPU PyTorch for conversion and reference fixtures. Rust GPU
+inference uses WGPU/Vulkan and does not require CUDA PyTorch. This environment
+covers the Rust port's helper scripts, not the upstream Blender/training stack.
+
+On a Linux laptop with both Intel graphics and an NVIDIA GPU, select the
+discrete GPU explicitly before running inference:
+
+```sh
+export CUBECL_WGPU_DEFAULT_DEVICE='DiscreteGpu(0)'
+.venv/bin/python scripts/make_reference_fixture.py --joints 8 --frames 4
+target/debug/rusty_pall compare-forward \
+  weights/unimate_uniml3d_f60_v3/forward_fixture.config.json \
+  weights/unimate_uniml3d_f60_v3/ema_named.pt \
+  weights/unimate_uniml3d_f60_v3/forward_fixture.pt
+```
+
+The NVIDIA driver and Vulkan ICD must be installed, and the process must have
+GPU device access. A sandbox may hide the GPU even when `nvidia-smi` works in
+your normal terminal. Fixtures use synthetic conditioning; preparing a real
+rig and prompt and exporting an animation remain separate work (see roadmap).
+
+For regular use, build with `cargo build --release --locked` and use
+`target/release/rusty_pall` in place of `target/debug/rusty_pall`.
+
+Validated on Linux with an RTX 2070 (8 GB), NVIDIA driver 615.71.09, and
+the discrete WGPU adapter: the full 71-joint × 60-frame forward comparison
+had max absolute error `5.25e-5` and RMSE `6.97e-6` against CPU PyTorch.
+A debug-build sample with synthetic conditioning, seed 10 and CFG 3 completed
+in 56 ODE evaluations (9 accepted steps, none rejected), producing finite
+float32 output of shape `[1, 71, 12, 60]`. One-second GPU polling observed
+1,165 MiB peak usage across these checks, including the desktop; this is not
+a guaranteed memory ceiling. The successful forward run also emitted
+`NVVM compilation failed: 3`; its cause has not been diagnosed. This verifies
+inference on this GPU, not real-rig animation quality or full-sample parity.
+
 Run `scripts/fetch_unimate_assets.sh` to download only the pinned current
 release's checkpoint, resolved `config.json`, and `dataset_stats.npy`. It
 places them in the ignored `weights/` directory and verifies file hashes. It
