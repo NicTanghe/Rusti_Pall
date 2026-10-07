@@ -1,8 +1,4 @@
-mod checkpoint;
-pub mod model;
-pub mod normalization;
-pub mod sampler;
-pub mod unimate;
+use rusty_pall::{checkpoint, model, normalization, sampler, unimate};
 
 use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use burn_store::pytorch::PytorchReader;

@@ -1,4 +1,6 @@
 /target
 /weights/
 /.venv/
+/.venv-rig/
+/outputs/
 __pycache__/
