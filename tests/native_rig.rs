@@ -162,6 +162,36 @@ def Xform "World" {
     let out = dir.join("rest.usda");
     prepared.export(&rig, &features, &out)?;
     validate_export(&rig, &out, 2, true)?;
+    // A self round trip missed invalid apiSchemas syntax in openusd 0.7.
+    // Use the independent reference parser when the USD tools are installed.
+    match std::process::Command::new("usdcat")
+        .arg(&out)
+        .arg("-o")
+        .arg(dir.join("reference.usdc"))
+        .output()
+    {
+        Ok(result) => assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("usdcat unavailable; independent USD parse check skipped")
+        }
+        Err(e) => return Err(e.into()),
+    }
     std::fs::remove_dir_all(dir)?;
     Ok(())
+}
+
+#[test]
+fn singleton_api_schema_lists_keep_list_edit_semantics() {
+    use rusty_pall::rig_motion::fix_api_schema_lists;
+    let source = "    prepend apiSchemas = \"SkelBindingAPI\"\n    apiSchemas = [\"A\", \"B\"]\n    string note = \"SkelBindingAPI\"\n";
+    let fixed = fix_api_schema_lists(source);
+    assert_eq!(
+        fixed,
+        "    prepend apiSchemas = [\"SkelBindingAPI\"]\n    apiSchemas = [\"A\", \"B\"]\n    string note = \"SkelBindingAPI\"\n"
+    );
+    assert_eq!(fix_api_schema_lists(&fixed), fixed);
 }

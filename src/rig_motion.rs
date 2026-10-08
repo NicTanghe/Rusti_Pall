@@ -469,7 +469,13 @@ impl Prepared {
                 .create_attribute(format!("{anim}.rotations"), "quatf[]")?
                 .set_at(sdf::Value::QuatfVec(quats), time)?;
         }
+        for path in &rig.meshes {
+            rig.stage
+                .prim(path.as_str())?
+                .apply_api("MaterialBindingAPI")?;
+        }
         for path in std::iter::once(&rig.skeleton).chain(&rig.meshes) {
+            rig.stage.prim(path.as_str())?.apply_api("SkelBindingAPI")?;
             rig.stage
                 .create_relationship(format!("{path}.skel:animationSource"))?
                 .set_targets([anim.as_str()])?;
@@ -481,6 +487,11 @@ impl Prepared {
         rig.stage
             .root_layer()
             .export(output.to_str().context("Output path must be UTF-8")?)?;
+        // openusd 0.7's text writer omits brackets on singleton token list ops.
+        // Its own parser accepts that spelling, but the reference USD parser
+        // rejects it for apiSchemas. Preserve the list-edit operation and token.
+        let text = fs::read_to_string(output)?;
+        fs::write(output, fix_api_schema_lists(&text))?;
         validate_export(rig, output, frames, false)?;
         fs::write(
             output.with_extension("validation.json"),
@@ -491,6 +502,34 @@ impl Prepared {
         )?;
         Ok(())
     }
+}
+
+pub fn fix_api_schema_lists(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let Some((left, right)) = line.split_once(" = ") else {
+                return line.to_owned();
+            };
+            let field = left.trim();
+            if !matches!(
+                field,
+                "apiSchemas"
+                    | "prepend apiSchemas"
+                    | "append apiSchemas"
+                    | "delete apiSchemas"
+                    | "add apiSchemas"
+                    | "reorder apiSchemas"
+            ) {
+                return line.to_owned();
+            }
+            let value = right.trim_end();
+            if value.starts_with('"') && value.ends_with('"') {
+                format!("{left} = [{value}]{}", &right[value.len()..])
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
 }
 
 /// Reopen the saved USD and verify its authored TRS and fixed bone lengths.

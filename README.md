@@ -84,6 +84,8 @@ target/release/animate_usd prepare /home/dude/Downloads/Megalania.usdz \
 target/release/animate_usd sample outputs/megalania-test 10 3
 # Only needed for an older export without a package:
 target/release/animate_usd package outputs/megalania-test
+# Rebuild USD/USDZ from saved motion, replacing exports without GPU sampling:
+target/release/animate_usd reexport outputs/megalania-test
 ```
 
 Preparation checks a saved rest-pose round trip before sampling. Export
@@ -100,6 +102,15 @@ completed on the RTX 2070: 63 joints, 60 frames, 104 ODE evaluations (12
 accepted and 5 rejected steps), approximately 722 seconds for sampling and
 USD export. The USD and packaged USDZ passed transform validation. Playback
 quality has not yet been visually verified.
+
+Exports produced before the singleton `apiSchemas` serialization fix may fail
+to open in Blender and other standard USD readers. Rebuild the executable and
+run `reexport` on the affected run directory; the saved motion is preserved.
+The native rig tests also check exported syntax with the independent `usdcat`
+parser when that tool is installed.
+Both saved Megalania runs were re-exported and imported into Blender 5.2.2:
+63 bones, one animation action, 11,355 mesh vertices and the 1024×1024 texture
+were present. This verifies import compatibility, not visual motion quality.
 
 ### Tensor inference CLI
 
