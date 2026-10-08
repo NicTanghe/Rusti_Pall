@@ -5,11 +5,13 @@ This crate is the start of an inference-only Burn port of UniMate's released
 runtime target is the resolved UniMate config and EMA weights, with prompt and
 joint-name embeddings supplied as inputs.
 
-See [PORT_ROADMAP.md](PORT_ROADMAP.md) for verified milestones and the remaining
-work to get from a real rig and prompt to an animation.
+See [PORT_ROADMAP.md](PORT_ROADMAP.md) for verified milestones and remaining
+real-rig validation work.
 
 ## Current status
 
+- The native `animate_usd` runner takes a USDZ rig, semantic joint labels and
+  a prompt through Rust text encoding, inference and USD animation export.
 - Burn 0.20.1 is pinned for the ndarray CPU and WGPU (Metal on macOS) backends.
 - The CLI parses and validates a resolved UniMate JSON config.
 - `sample` runs seeded flow inference on WGPU (Metal on macOS) and writes
@@ -44,6 +46,62 @@ work to get from a real rig and prompt to an animation.
   parity remains to be measured. No model weights are tracked in Git.
 
 ## Run
+
+### Native Rust rig animation
+
+`animate_usd` reads USDZ with `mxpv/openusd`, builds rig conditioning, encodes
+the prompt and joint labels with Candle FLAN-T5, samples with Burn/WGPU, and
+writes USD animation. The runtime does not invoke Python or Blender. It uses
+the converted EMA checkpoint from the initial setup described below.
+
+```sh
+cargo build --release --locked --bin animate_usd
+target/release/animate_usd fetch-text
+target/release/animate_usd run \
+  /home/dude/Downloads/Megalania.usdz \
+  examples/megalania.labels.json \
+  outputs/megalania-walk \
+  'A quadruped walks forward.'
+```
+
+Choose a new output directory for each run. `fetch-text` downloads the pinned
+FLAN-T5 assets once (approximately 1 GB). `RUSTI_PALL_MODEL_DIR` and
+`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling selects discrete
+WGPU adapter 0, which must be accessible to the process.
+
+The output contains `animation.usdz` with the original mesh and texture,
+`package/animation.usda`, the raw motion tensor in `motion.json`, saved
+conditioning, validation reports, and a labelled `skeleton.svg`. Animation
+has 60 frames at 30 fps. Open the USDZ in a viewer supporting USD skeletal
+animation to assess the generated motion.
+
+For separate preparation and sampling:
+
+```sh
+target/release/animate_usd inspect /home/dude/Downloads/Megalania.usdz
+target/release/animate_usd prepare /home/dude/Downloads/Megalania.usdz \
+  examples/megalania.labels.json outputs/megalania-test 'A quadruped walks forward.'
+target/release/animate_usd sample outputs/megalania-test 10 3
+# Only needed for an older export without a package:
+target/release/animate_usd package outputs/megalania-test
+```
+
+Preparation checks a saved rest-pose round trip before sampling. Export
+reopens every frame and checks finite transforms, unit quaternions and fixed
+bone lengths. Supported inputs currently have one skeleton, 4–71 joints in
+parent-before-child order, rigid joint rest transforms, static ancestor
+transforms, and Y or Z up. Semantic labels and a left/right facing pair are
+required; the included annotation is specific to Megalania. This path is
+experimental: numerical checks do not establish natural motion, correct
+skinning in every viewer, or parity with upstream real-rig preprocessing.
+
+The Megalania test with prompt `A quadruped walks forward.`, seed 10 and CFG 3
+completed on the RTX 2070: 63 joints, 60 frames, 104 ODE evaluations (12
+accepted and 5 rejected steps), approximately 722 seconds for sampling and
+USD export. The USD and packaged USDZ passed transform validation. Playback
+quality has not yet been visually verified.
+
+### Tensor inference CLI
 
 ```sh
 cargo run -- path/to/config.json
@@ -92,8 +150,8 @@ target/debug/rusty_pall compare-forward \
 
 The NVIDIA driver and Vulkan ICD must be installed, and the process must have
 GPU device access. A sandbox may hide the GPU even when `nvidia-smi` works in
-your normal terminal. Fixtures use synthetic conditioning; preparing a real
-rig and prompt and exporting an animation remain separate work (see roadmap).
+your normal terminal. Fixtures use synthetic conditioning; use `animate_usd`
+above for the experimental real-rig pipeline.
 
 For regular use, build with `cargo build --release --locked` and use
 `target/release/rusty_pall` in place of `target/debug/rusty_pall`.
@@ -114,8 +172,8 @@ release's checkpoint, resolved `config.json`, and `dataset_stats.npy`. It
 places them in the ignored `weights/` directory and verifies file hashes. It
 does not download the dataset, training logs, or sample renders. Inference must
 select EMA weights from the checkpoint. For the initial Rust implementation,
-provide precomputed T5 caption and joint-name embeddings so text tokenization
-and FLAN-T5 are outside the denoiser port.
+the tensor CLI accepts precomputed T5 embeddings. The native `animate_usd`
+runner computes these embeddings with Candle.
 
 The released `.pt` checkpoint stores EMA values as an ordered `shadow_params`
 list, without parameter names. Burn's reader cannot map that list directly.
@@ -190,13 +248,13 @@ the output; without them it remains normalized. Its input
 `n_joints` and `motion_lengths` `[B]`, `joint_names_emb` `[B,J,768]`,
 `joint_depths` `[B,J]`, `graph_dist` and `joint_relations` `[B,J,J]`, and
 `spectral_coords` `[B,J,max_freqs]`. Text embeddings and rig features must
-already be prepared; the standard rig/prompt-to-conditioning preparation and
-rig-to-animation reconstruction/export are still outstanding. Burn seeding is
+already be prepared; `animate_usd` provides a separate native USDZ preparation
+and animation export path. Burn seeding is
 backend-wide, so pass the same saved noise tensor when comparing backends.
 Rust uses the Dormand-Prince 5(4) tableau, torchdiffeq-style initial-step
 selection, and the released tolerances. Reduced-shape end-to-end samples are
-close; full-shape ODE parity against PyTorch and asset-to-animation output
-remain outstanding.
+close; full-shape ODE parity against PyTorch and visual validation of real-rig
+output remain outstanding.
 
 The downloaded model is released under CC-BY-NC-4.0. The upstream source code
 in `reference/UniMate` is MIT licensed; see its included `LICENSE` file.

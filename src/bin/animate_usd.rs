@@ -133,6 +133,7 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
         &serde_json::json!({"shape":[1,prepared.width,12,prepared.frames],"values":values,"seed":seed,"cfg":cfg}),
     )?;
     prepared.export(&rig, &values, &output.join("package/animation.usda"))?;
+    package(out)?;
     write_json(
         output.join("run.json"),
         &serde_json::json!({"seed":seed,"cfg":cfg,"sampling_export_seconds":start.elapsed().as_secs_f64(),"prompt":prepared.prompt}),
@@ -142,6 +143,48 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
         output.join("package/animation.usda").display(),
         start.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+fn package(out: &str) -> Result<()> {
+    let output = Path::new(out);
+    let prepared: Prepared = serde_json::from_slice(&fs::read(output.join("conditioning.json"))?)?;
+    let destination = output.join("animation.usdz");
+    ensure!(!destination.exists(), "Animation package already exists");
+    let source = Path::new(&prepared.input);
+    let rig = Rig::open(source)?;
+    let mut original = zip::ZipArchive::new(fs::File::open(source)?)?;
+    // Use a distinct root name without overwriting any source asset.
+    let names: std::collections::BTreeSet<String> =
+        original.file_names().map(str::to_owned).collect();
+    let mut root_name = "unimate-animation.usda".to_owned();
+    while names.contains(&root_name) {
+        root_name.insert_str(0, "_");
+    }
+    let temporary = output.join("animation.usdz.part");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let mut archive = openusd::usdz::ArchiveWriter::new(file);
+    archive.add_layer(
+        &root_name,
+        &fs::read(output.join("package/animation.usda"))?,
+    )?;
+    for i in 0..original.len() {
+        let mut entry = original.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+        archive.add_layer(entry.name(), &bytes)?;
+    }
+    archive.finish()?;
+    // The resolver selects archive handling by extension.
+    fs::rename(&temporary, &destination)?;
+    rusty_pall::rig_motion::validate_export(&rig, &destination, prepared.frames, false)?;
+    eprintln!("Packaged {}", destination.display());
     Ok(())
 }
 
@@ -210,6 +253,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&rig.report())?);
         }
         Some("fetch-text") if a.len() == 1 => text_encoder::fetch(&text_dir())?,
+        Some("package") if a.len() == 2 => package(&a[1])?,
         Some("prepare" | "run") if a.len() == 5 => {
             prepare_run(&a[1], &a[2], &a[3], &a[4])?;
             if a[0] == "run" {
@@ -222,7 +266,7 @@ fn run() -> Result<()> {
             a.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3.),
         )?,
         _ => anyhow::bail!(
-            "Usage:\n  animate_usd inspect <rig.usdz>\n  animate_usd fetch-text\n  animate_usd prepare <rig.usdz> <labels.json> <new-output-dir> <prompt>\n  animate_usd sample <output-dir> [seed=10] [cfg=3]\n  animate_usd run <rig.usdz> <labels.json> <new-output-dir> <prompt>\nModel paths can be overridden with RUSTI_PALL_MODEL_DIR and RUSTI_PALL_TEXT_DIR."
+            "Usage:\n  animate_usd inspect <rig.usdz>\n  animate_usd fetch-text\n  animate_usd package <output-dir>\n  animate_usd prepare <rig.usdz> <labels.json> <new-output-dir> <prompt>\n  animate_usd sample <output-dir> [seed=10] [cfg=3]\n  animate_usd run <rig.usdz> <labels.json> <new-output-dir> <prompt>\nModel paths can be overridden with RUSTI_PALL_MODEL_DIR and RUSTI_PALL_TEXT_DIR."
         ),
     }
     Ok(())
