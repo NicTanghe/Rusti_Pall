@@ -16,7 +16,7 @@ use openusd::{gf, sdf, usd};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, fs, path::Path};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Prepared {
     pub input: String,
     pub prompt: String,
@@ -258,6 +258,18 @@ impl Prepared {
         seed: u64,
         scale: f32,
     ) -> Result<Vec<f32>> {
+        self.sample_constrained(cfg, weights, stats, seed, scale, None)
+    }
+
+    pub fn sample_constrained(
+        &self,
+        cfg: &UniMateConfig,
+        weights: &Path,
+        stats: &NormalizationStats,
+        seed: u64,
+        scale: f32,
+        replacement: Option<&crate::motion_tasks::Replacement>,
+    ) -> Result<Vec<f32>> {
         ensure!(
             scale.is_finite() && scale >= 1.,
             "CFG scale must be finite and >= 1"
@@ -265,6 +277,10 @@ impl Prepared {
         let w = self.width;
         let f = self.frames;
         let k = self.frequencies;
+        if let Some(r) = replacement {
+            r.validate(w, f)?;
+            ensure!(scale > 1., "Constrained sampling requires CFG > 1");
+        }
         ensure!(
             w == cfg.dataset.max_joints
                 && f == cfg.dataset.max_motion_length
@@ -313,7 +329,7 @@ impl Prepared {
                 &device,
             ),
             motion_lengths: Tensor::<Wgpu, 1, Int>::from_data(
-                TensorData::new(vec![f as i64], [1]),
+                TensorData::new(vec![replacement.map_or(f, |r| r.valid_frames) as i64], [1]),
                 &device,
             ),
             joint_names_emb: Tensor::from_data(
@@ -338,13 +354,40 @@ impl Prepared {
             ),
         };
         let noise = sampler::standard_normal_noise::<Wgpu, 4>([1, w, 12, f], seed, &device);
-        let (sample, info) = model
-            .sample_dopri5(noise, &condition, scale)
-            .map_err(anyhow::Error::msg)?;
-        eprintln!(
-            "ODE evaluations={}, accepted={}, rejected={}",
-            info.evaluations, info.accepted_steps, info.rejected_steps
-        );
+        let sample = if let Some(r) = replacement {
+            r.validate(w, f)?;
+            let mut known = r.known.clone();
+            for j in 0..w {
+                let s = stats
+                    .for_joint::<12>("objaverse", j)
+                    .map_err(anyhow::Error::msg)?;
+                for d in 0..12 {
+                    for t in 0..f {
+                        let i = (j * 12 + d) * f + t;
+                        known[i] = (known[i] - s.mean[d]) / s.std[d];
+                    }
+                }
+            }
+            model
+                .sample_replacement(
+                    noise,
+                    Tensor::from_data(TensorData::new(known, [1, w, 12, f]), &device),
+                    Tensor::from_data(TensorData::new(r.keep.clone(), [1, w, 12, f]), &device),
+                    &condition,
+                    scale,
+                    r.steps,
+                )
+                .map_err(anyhow::Error::msg)?
+        } else {
+            let (sample, info) = model
+                .sample_dopri5(noise, &condition, scale)
+                .map_err(anyhow::Error::msg)?;
+            eprintln!(
+                "ODE evaluations={}, accepted={}, rejected={}",
+                info.evaluations, info.accepted_steps, info.rejected_steps
+            );
+            sample
+        };
         let mut values = sample
             .into_data()
             .to_vec::<f32>()
@@ -364,6 +407,14 @@ impl Prepared {
             values.iter().all(|v| v.is_finite()),
             "Non-finite generated motion"
         );
+        if let Some(r) = replacement {
+            // Preserve the caller's raw representation exactly after inverse normalization.
+            for (i, keep) in r.keep.iter().enumerate() {
+                if *keep {
+                    values[i] = r.known[i];
+                }
+            }
+        }
         Ok(values)
     }
 

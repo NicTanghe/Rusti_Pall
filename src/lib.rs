@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod model;
+pub mod motion_tasks;
 pub mod normalization;
 pub mod rig_motion;
 pub mod sampler;

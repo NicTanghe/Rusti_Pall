@@ -33,6 +33,18 @@ Burn, with native USDZ rig preparation and animation export in `animate_usd`.
 
 ## Remaining validation
 
+Native `animate_usd inbetween`, `edit`, and `expand` now implement the
+replacement sampler and multi-prompt stitching. CPU tests cover per-step
+pinning, selectors, short clips, facing transforms and seam layout. See the
+README for commands and shell wrappers. Reference inputs currently come from
+saved native motion JSON; upstream dataset case lookup and original USD/FBX
+clip-to-feature conversion remain to be implemented. Full default-step visual
+validation and comparison against upstream constrained sampling remain open.
+All three native modes passed RTX 2070 smoke tests (two steps for constrained
+segments). The two-segment expansion produced 110 frames with exact overlap
+features and stitch layout. All three exports opened with the reference USD
+parser and imported into Blender with 63 bones and animation actions.
+
 1. Review generated Megalania animation in a viewer with USD skeletal
    animation support. Numeric invariants alone do not verify natural motion,
    deformation quality, ground contact or the effect of semantic labels.

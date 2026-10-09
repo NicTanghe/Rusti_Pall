@@ -617,6 +617,51 @@ impl<B: Backend> UniMateDenoiser<B> {
             })
         })
     }
+
+    pub fn sample_replacement(
+        &self,
+        noise: Tensor<B, 4>,
+        known: Tensor<B, 4>,
+        keep: Tensor<B, 4, burn::tensor::Bool>,
+        condition: &DenoiserCondition<B>,
+        cfg_scale: f32,
+        steps: usize,
+    ) -> Result<Tensor<B, 4>, String> {
+        if !cfg_scale.is_finite() || cfg_scale <= 1. {
+            return Err("constrained sampling requires CFG > 1".into());
+        }
+        let mut step = 0;
+        crate::sampler::sample_replacement(noise, known, keep, steps, |state, time| {
+            step += 1;
+            eprintln!("Replacement step {step}/{steps}");
+            crate::sampler::predict_cfg(state, time, cfg_scale, |state, time, unconditional| {
+                let [batch, _, _, _] = state.dims();
+                let time_values = Tensor::<B, 1>::from_data(
+                    TensorData::new(vec![time; batch], [batch]),
+                    &state.device(),
+                );
+                let caption = if unconditional {
+                    condition.caption_embedding.clone() * 0.
+                } else {
+                    condition.caption_embedding.clone()
+                };
+                self.forward(
+                    state.clone(),
+                    time_values,
+                    caption,
+                    condition.tpos_first_frame.clone(),
+                    condition.tpos_first_frame_parents.clone(),
+                    condition.n_joints.clone(),
+                    condition.motion_lengths.clone(),
+                    condition.joint_names_emb.clone(),
+                    condition.joint_depths.clone(),
+                    condition.graph_dist.clone(),
+                    condition.joint_relations.clone(),
+                    condition.spectral_coords.clone(),
+                )
+            })
+        })
+    }
 }
 
 fn ema_weight_store(path: impl AsRef<Path>) -> Result<PytorchStore, String> {

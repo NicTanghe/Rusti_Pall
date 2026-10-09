@@ -1,4 +1,6 @@
 //! A native Rust USDZ → UniMate → animated USD runner. No Python processes.
+#[path = "animate_usd/tasks.rs"]
+mod tasks;
 use anyhow::{Context, Result, ensure};
 use rusty_pall::{
     normalization::NormalizationStats,
@@ -268,7 +270,12 @@ fn preview(p: &Prepared, path: &Path) -> Result<()> {
 
 fn run() -> Result<()> {
     let a: Vec<_> = std::env::args().skip(1).collect();
+    if a.iter().any(|v| v == "-h" || v == "--help") {
+        println!("{}", tasks::HELP);
+        return Ok(());
+    }
     match a.first().map(String::as_str) {
+        Some("inbetween" | "edit" | "expand") => tasks::run(&a)?,
         Some("inspect") if a.len() == 2 => {
             let rig = Rig::open(Path::new(&a[1]))?;
             println!("{}", serde_json::to_string_pretty(&rig.report())?);

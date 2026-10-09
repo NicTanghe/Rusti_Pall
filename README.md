@@ -112,6 +112,90 @@ Both saved Megalania runs were re-exported and imported into Blender 5.2.2:
 63 bones, one animation action, 11,355 mesh vertices and the 1024×1024 texture
 were present. This verifies import compatibility, not visual motion quality.
 
+### In-betweening, editing and expansion (Rust)
+
+Build with `cargo build --release --locked --bin animate_usd`. These commands
+reuse the rig and conditioning in an existing native run. In-betweening and
+editing also read its **denormalized `motion.json`** as the known motion. For
+the examples below that is a previously generated clip, not ground truth from
+the downloaded asset. Direct upstream dataset case IDs, `.npy` clips, and
+extraction of the original USD/FBX animation into motion features are not yet
+supported by this CLI. Do not use a reference from another rig or joint order.
+
+```sh
+# Keep the first and last generation slots; regenerate the transition.
+target/release/animate_usd inbetween \
+  outputs/megalania-native outputs/megalania-tasks \
+  'A quadruped walks forward.' --keep_frames '0,-1'
+
+# Keep the Neck and Head feature tracks; regenerate the rest under a new prompt.
+target/release/animate_usd edit \
+  outputs/megalania-native outputs/megalania-tasks \
+  'A quadruped walks slowly.' --keep_joints 'Neck,Head'
+
+# Generate three prompts as one longer animation, with ten-frame overlaps.
+target/release/animate_usd expand \
+  outputs/megalania-native outputs/megalania-tasks \
+  examples/megalania.sequence.json --expand_overlap 10
+```
+
+Each creates its own `inbetween/`, `motion_edit/`, or `motion_expand/`
+subdirectory containing `animation.usdz`, `motion.json`, `constraint.json`,
+constraint validation, and per-segment motion/conditioning files. Use a new
+output root when repeating the same mode. In-betweening/editing additionally
+save the selected reference window as `reference-motion.json`, realigned to
+face +Z on its first frame. No source motion is overwritten.
+
+The common options are `--seed 10`, `--cfg_scale 3` (must be greater than 1),
+and `--steps 50`. Constrained segments use fixed Euler steps with the same
+noise interpolant pinned after every step; free sampling and expansion's
+first segment retain adaptive Dopri5. Reducing `--steps` is useful for a
+smoke test, but changes numerical quality. It does not change clip length.
+Seeds advance by one per expansion segment.
+
+`--keep_frames` supports signed indices, resolves negatives relative to the
+60-frame window, and clamps out-of-range values like upstream. `--keep_joints`
+matches raw full/leaf bone names or semantic labels case-insensitively. Unlike
+upstream's warning-only handling, a misspelled/unmatched name fails here.
+`--gt_start_frame 0` chooses a deterministic reference window for either mode.
+Short references repeat their last pose for constraints: editing trims its
+result and reference to the actual length, while in-betweening keeps the full
+generation window and saves only the actual reference frames.
+
+Expansion realigns each seed overlap, rotates the resulting segment back, and
+joins it without duplicating the overlap. N prompts produce
+`60 + (N - 1) * (60 - overlap)` frames at 30 fps. The three-prompt example is
+160 frames, about 5.3 seconds. This extends motion through multiple model
+windows; it does not change the model's generation frame rate.
+
+Exact constraints refer to **UniMate feature values**, not world-space IK
+locks or absolute endpoint locations. Moving parent joints or the root can
+move a kept joint in world space. Visual seam quality still needs review.
+
+Shell wrappers run the same Rust executable (their arguments differ from the
+upstream Python dataset wrappers):
+
+```sh
+KEEP_FRAMES='0,-1' bash scripts/run_sample_motion_inbetween.sh \
+  outputs/megalania-native outputs/megalania-wrapper 'A quadruped walks forward.'
+KEEP_JOINTS='Neck,Head' bash scripts/run_sample_motion_edit.sh \
+  outputs/megalania-native outputs/megalania-wrapper 'A quadruped walks slowly.'
+EXPAND_OVERLAP=10 bash scripts/run_sample_motion_expand.sh \
+  outputs/megalania-native outputs/megalania-wrapper examples/megalania.sequence.json
+```
+
+Run any wrapper with `-h` for help. Set its selector through the environment
+variable, or use the native command directly with the corresponding option.
+
+Validation: five CPU tests pass, and all three modes completed RTX 2070 smoke
+tests. The constrained tests used two Euler steps; expansion used a normal
+first segment followed by a two-step continuation. Saved endpoint/joint
+features and the expansion overlap matched their references exactly, and the
+two-segment chain contained 110 frames with no duplicated overlap. All three
+USDZ files opened with the reference USD parser and imported into Blender
+with 63 bones and an animation action. These checks verify execution and
+constraints; they do not establish motion quality at the default 50 steps.
+
 ### Tensor inference CLI
 
 ```sh

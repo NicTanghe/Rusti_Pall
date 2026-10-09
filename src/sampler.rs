@@ -3,7 +3,35 @@
 //! The model call stays outside this module so the sampler can be validated
 //! independently of the architecture port.
 
-use burn::tensor::{Distribution, Tensor, backend::Backend};
+use burn::tensor::{Bool, Distribution, Tensor, backend::Backend};
+
+/// Linear-path replacement sampling, matching upstream's fixed-step Euler mode.
+/// The same noise is reused for the known slice at every integration time.
+pub fn sample_replacement<B: Backend, const D: usize>(
+    noise: Tensor<B, D>,
+    known: Tensor<B, D>,
+    keep: Tensor<B, D, Bool>,
+    steps: usize,
+    mut velocity: impl FnMut(&Tensor<B, D>, f32) -> Tensor<B, D>,
+) -> Result<Tensor<B, D>, String> {
+    if steps == 0 || noise.dims() != known.dims() || noise.dims() != keep.dims() {
+        return Err("replacement sampling requires positive steps and matching tensors".into());
+    }
+    let mut state = noise.clone();
+    for i in 0..steps {
+        let t = i as f32 / steps as f32;
+        let next = (i + 1) as f32 / steps as f32;
+        let v = velocity(&state, t);
+        state = euler_step(state, v, next - t);
+        let pinned = if i + 1 == steps {
+            known.clone()
+        } else {
+            noise.clone() * (1. - next) + known.clone() * next
+        };
+        state = state.mask_where(keep.clone(), pinned);
+    }
+    Ok(state)
+}
 
 /// Create the standard-normal initial state used by flow sampling.
 ///
