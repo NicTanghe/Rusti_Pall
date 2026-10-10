@@ -66,8 +66,13 @@ target/release/animate_usd run \
 
 Choose a new output directory for each run. `fetch-text` downloads the pinned
 FLAN-T5 assets once (approximately 1 GB). `RUSTI_PALL_MODEL_DIR` and
-`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling selects discrete
-WGPU adapter 0, which must be accessible to the process.
+`RUSTI_PALL_TEXT_DIR` override the model directories. On Linux, sampling selects discrete
+WGPU adapter 0, which must be accessible to the process. On macOS, builds
+automatically enable native Metal: Burn compiles kernels to MSL and samples on
+the default (Apple Silicon integrated) GPU, and FLAN-T5 encoding runs on Candle's
+Metal device, retrying on the CPU if Metal fails. Set
+`CUBECL_WGPU_DEFAULT_DEVICE` (e.g. `IntegratedGpu(0)`) to override the macOS
+adapter. See [`src/gpu.rs`](src/gpu.rs).
 
 The output contains `animation.usdz` with the original mesh and texture,
 `package/animation.usda`, the raw motion tensor in `motion.json`, saved

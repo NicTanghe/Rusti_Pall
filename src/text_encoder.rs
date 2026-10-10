@@ -1,4 +1,5 @@
-//! CPU FLAN-T5 encoding using Candle. Each sequence is encoded unpadded,
+//! FLAN-T5 encoding using Candle (Metal on macOS, CPU elsewhere). Each
+//! sequence is encoded unpadded,
 //! since Candle's T5 encoder does not expose an encoder padding mask.
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor};
@@ -32,6 +33,17 @@ pub fn fetch(dir: &Path) -> Result<()> {
 }
 
 pub fn encode(dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let device = crate::gpu::text_device();
+    match encode_on(dir, texts, &device) {
+        Err(e) if !device.is_cpu() => {
+            eprintln!("GPU text encoding failed ({e:#}); retrying on CPU");
+            encode_on(dir, texts, &Device::Cpu)
+        }
+        result => result,
+    }
+}
+
+fn encode_on(dir: &Path, texts: &[String], device: &Device) -> Result<Vec<Vec<f32>>> {
     let config: Config = serde_json::from_slice(&fs::read(dir.join("config.json"))?)?;
     ensure!(
         config.d_model == 768,
@@ -40,10 +52,9 @@ pub fn encode(dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let mut tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     tokenizer.with_padding(None);
-    let device = Device::Cpu;
     // Loading to owned tensors avoids exposing mmap lifetime to an overwritten cache.
-    let tensors = candle_core::safetensors::load(dir.join("model.safetensors"), &device)?;
-    let vb = candle_nn::VarBuilder::from_tensors(tensors, DType::F32, &device);
+    let tensors = candle_core::safetensors::load(dir.join("model.safetensors"), device)?;
+    let vb = candle_nn::VarBuilder::from_tensors(tensors, DType::F32, device);
     let mut model = T5EncoderModel::load(vb, &config)?;
     let mut cache = BTreeMap::new();
     for text in texts {
@@ -57,7 +68,7 @@ pub fn encode(dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             !enc.is_empty() && enc.len() <= 512,
             "Text must tokenize to 1–512 tokens"
         );
-        let ids = Tensor::new(enc.get_ids(), &device)?.unsqueeze(0)?;
+        let ids = Tensor::new(enc.get_ids(), device)?.unsqueeze(0)?;
         let embedding = model.forward(&ids)?.mean(1)?.squeeze(0)?.to_vec1::<f32>()?;
         ensure!(
             embedding.len() == 768 && embedding.iter().all(|v| v.is_finite()),

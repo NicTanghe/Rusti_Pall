@@ -112,7 +112,7 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
     let mut prepared: Prepared = serde_json::from_slice(&fs::read(&path)?)?;
     let rig = Rig::open(Path::new(&prepared.input))?;
     if prepared.caption.is_empty() {
-        eprintln!("Encoding prompt and joint labels with native CPU FLAN-T5...");
+        eprintln!("Encoding prompt and joint labels with native FLAN-T5...");
         prepared
             .embed(&text_dir())
             .context("Text encoding failed. Run 'animate_usd fetch-text' if weights are missing")?;
@@ -120,8 +120,9 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
     }
     let start = std::time::Instant::now();
     eprintln!(
-        "Sampling {} frames on discrete WGPU adapter 0...",
-        prepared.frames
+        "Sampling {} frames on {}...",
+        prepared.frames,
+        rusty_pall::gpu::description()
     );
     let values = prepared.sample(
         &config()?,

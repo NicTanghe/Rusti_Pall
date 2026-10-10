@@ -305,7 +305,7 @@ impl Prepared {
                 && self.depths.len() == w,
             "Invalid topology dimensions"
         );
-        let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(0);
+        let device = crate::gpu::device();
         let mut model = model::UniMateDenoiser::<Wgpu>::from_config(cfg, &device)
             .map_err(anyhow::Error::msg)?;
         model
