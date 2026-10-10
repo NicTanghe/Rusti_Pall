@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         Some(config_path) => validate_config(config_path.to_owned()),
         None => {
             eprintln!(
-                "Usage:\n  rusty_pall <resolved-config.json>\n  rusty_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_pall inspect-burn-weights <ema_named.pt>\n  rusty_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (auto: CUDA, then WGPU)\n  rusty_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (auto: CUDA, then WGPU)\n  rusty_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale] [stats.json dataset_type]  (auto: CUDA, then WGPU)"
+                "Usage:\n  rusty_pall <resolved-config.json>\n  rusty_pall inspect-model <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-ema <checkpoint.pt> [manifest.json]\n  rusty_pall inspect-weights <named-weights.pt> [manifest.json]\n  rusty_pall inspect-burn-weights <ema_named.pt>\n  rusty_pall check-weights <resolved-config.json> <ema_named.pt>\n  rusty_pall compare-forward <config.json> <ema_named.pt> <fixture.pt>  (auto: Metal on macOS, otherwise CUDA, then WGPU)\n  rusty_pall compare-forward-cpu <config.json> <ema_named.pt> <fixture.pt>\n  rusty_pall compare-sample <config.json> <ema_named.pt> <sampling_fixture.pt> [cfg_scale]  (auto: Metal on macOS, otherwise CUDA, then WGPU)\n  rusty_pall sample <config.json> <ema_named.pt> <conditioning.pt> <output.npy> [seed] [cfg_scale] [stats.json dataset_type]  (auto: Metal on macOS, otherwise CUDA, then WGPU)"
             );
             ExitCode::from(2)
         }
@@ -51,13 +51,11 @@ fn compare_forward_wgpu(args: Vec<String>) -> ExitCode {
 
 fn dispatch_gpu(args: Vec<String>, operation: &str) -> ExitCode {
     match rusty_pall::compute::selected() {
-        #[cfg(feature = "cuda")]
-        Ok(rusty_pall::compute::Compute::Cuda) => {
-            dispatch_with::<burn::backend::Cuda>(args, operation)
-        }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        Ok(rusty_pall::compute::Compute::Cuda) => dispatch_with::<burn_cuda::Cuda>(args, operation),
+        #[cfg(not(all(feature = "cuda", not(target_os = "macos"))))]
         Ok(rusty_pall::compute::Compute::Cuda) => ExitCode::FAILURE,
-        Ok(rusty_pall::compute::Compute::Wgpu) => {
+        Ok(rusty_pall::compute::Compute::Metal | rusty_pall::compute::Compute::Wgpu) => {
             dispatch_with::<burn::backend::Wgpu>(args, operation)
         }
         Err(e) => {

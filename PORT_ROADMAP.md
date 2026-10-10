@@ -6,8 +6,10 @@ The frozen UniMate graph/adaLN denoiser and flow sampler are implemented in
 Burn, with native USDZ rig preparation and animation export in `animate_usd`.
 
 - Released EMA weights load strictly into the Burn model.
-- Both CLIs prefer direct CUDA after a device test, with WGPU fallback and
-  an explicit backend override. CUDA is enabled by default; HIP is not added.
+- Both CLIs automatically prefer Metal/MSL on macOS and direct CUDA elsewhere,
+  with WGPU fallback and explicit backend overrides. Default macOS builds
+  exclude CUDA dependencies. Text encoding stays on CPU on every platform.
+  No backend-specific binaries or HIP implementation are needed.
 - The full CUDA forward pass on the RTX 2070 matched the PyTorch fixture
   with maximum absolute output error `4.53e-5` and RMSE `6.36e-6`. A CUDA
   constrained-sampling smoke test preserved pinned features exactly and

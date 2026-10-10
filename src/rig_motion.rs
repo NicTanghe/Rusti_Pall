@@ -268,8 +268,8 @@ impl Prepared {
         replacement: Option<&crate::motion_tasks::Replacement>,
     ) -> Result<Vec<f32>> {
         match crate::compute::selected()? {
-            #[cfg(feature = "cuda")]
-            crate::compute::Compute::Cuda => self.sample_with::<burn::backend::Cuda>(
+            #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+            crate::compute::Compute::Cuda => self.sample_with::<burn_cuda::Cuda>(
                 cfg,
                 weights,
                 stats,
@@ -278,9 +278,10 @@ impl Prepared {
                 replacement,
                 Default::default(),
             ),
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(all(feature = "cuda", not(target_os = "macos"))))]
             crate::compute::Compute::Cuda => anyhow::bail!("CUDA not compiled"),
-            crate::compute::Compute::Wgpu => self.sample_with::<burn::backend::Wgpu>(
+            crate::compute::Compute::Metal | crate::compute::Compute::Wgpu => self
+                .sample_with::<burn::backend::Wgpu>(
                 cfg,
                 weights,
                 stats,

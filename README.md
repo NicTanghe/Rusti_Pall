@@ -12,9 +12,9 @@ real-rig validation work.
 
 - The native `animate_usd` runner takes a USDZ rig, semantic joint labels and
   a prompt through Rust text encoding, inference and USD animation export.
-- Burn 0.20.1 is pinned for the CUDA, ndarray CPU and WGPU backends.
+- Burn 0.20.1 is pinned for the CUDA, Metal, ndarray CPU and WGPU backends.
 - The CLI parses and validates a resolved UniMate JSON config.
-- `sample` runs seeded flow inference on CUDA or WGPU and writes
+- `sample` runs seeded flow inference on Metal, CUDA or WGPU and writes
   normalized float32 NumPy motion output.
 - Flow sampling supports adaptive Dormand-Prince 5(4) integration with the
   upstream `atol=1e-6`, `rtol=1e-3`, 50 requested points, and sequential CFG.
@@ -66,17 +66,22 @@ target/release/animate_usd run \
 
 Choose a new output directory for each run. `fetch-text` downloads the pinned
 FLAN-T5 assets once (approximately 1 GB). `RUSTI_PALL_MODEL_DIR` and
-`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling prefers CUDA
-device 0 when its device test succeeds, otherwise it uses WGPU.
+`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling automatically
+prefers Metal on macOS, CUDA device 0 elsewhere when available, and otherwise
+tries WGPU.
 
 ### GPU backend selection
 
-CUDA support is included in default builds. Both CLIs automatically test CUDA
-first, then WGPU. The test performs a small GPU calculation and readback in a
-separate process, so missing CUDA libraries or driver initialization failures
+Use the same build command and CLI on every platform; no backend-specific
+binaries are needed. macOS builds automatically include native Metal/MSL
+support and exclude CUDA dependencies. Other platforms include CUDA by
+default. Both CLIs test Metal first on macOS, or CUDA elsewhere, then try
+WGPU if the preferred backend fails. The test performs GPU arithmetic and
+readback in a separate process, so missing CUDA libraries or driver initialization failures
 can trigger fallback without crashing the inference process. Selection is
 cached for the invocation, including multi-segment expansion. Text encoding
-still runs on the CPU.
+always runs on the CPU, including on macOS, independently of the motion
+backend.
 
 ```sh
 cd /home/dude/dev/Rusti_Pall
@@ -84,14 +89,19 @@ cargo build --release --locked --bins
 ./target/release/animate_usd backend
 
 # Overrides work in bash and fish; apply to any inference command.
+env RUSTI_PALL_BACKEND=metal ./target/release/animate_usd backend # macOS
 env RUSTI_PALL_BACKEND=cuda ./target/release/animate_usd backend
 env RUSTI_PALL_BACKEND=wgpu ./target/release/animate_usd backend
 ```
 
-`RUSTI_PALL_BACKEND=auto` is the default. Explicit `cuda` fails if CUDA cannot
-run, instead of silently selecting another backend. WGPU uses its default
+`RUSTI_PALL_BACKEND=auto` is the default. Explicit `metal` or `cuda` fails if
+that backend cannot run, instead of silently selecting another backend. `metal` is available
+only on macOS; `cuda` is unavailable on macOS. WGPU uses its default
 high-power device selection; `CUBECL_WGPU_DEFAULT_DEVICE=DiscreteGpu(0)` can
-override it. Explicit `compare-forward-wgpu` and `compare-forward-metal`
+override it (use `IntegratedGpu(0)` for an Apple Silicon GPU).
+Metal uses Burn's WGPU runtime with native MSL kernels; explicit `wgpu` on
+macOS uses that same runtime, so fallback cannot rescue a missing Metal device.
+Explicit `compare-forward-wgpu` and `compare-forward-metal`
 commands retain their WGPU behavior. Once inference starts, errors are
 reported; a failed inference is not automatically retried on another backend.
 
@@ -103,7 +113,8 @@ API bindings understood by the pinned cudarc version, avoiding its rejection
 of newer toolkit version strings such as 13.4. It does not install or replace
 the toolkit; an explicit `CUDARC_CUDA_VERSION` overrides that build setting.
 CUDA libraries are loaded at runtime. For a build that omits CUDA entirely,
-use `cargo build --release --locked --no-default-features --bins`.
+use `cargo build --release --locked --no-default-features --bins`. This still
+includes native Metal automatically on macOS.
 
 Validated on the RTX 2070 with the installed CUDA 13.4 toolkit: automatic CUDA
 selection, explicit WGPU selection, and automatic WGPU fallback with an
@@ -276,7 +287,7 @@ The Python import is `unimate`. Its pinned source already lives in
 `reference/UniMate`; setup registers that directory in this virtual environment
 without copying it or modifying the system Python installation. On Linux,
 setup installs CPU PyTorch for conversion and reference fixtures. Rust GPU
-inference uses native CUDA or WGPU and does not require CUDA PyTorch. This environment
+inference uses native Metal, CUDA or WGPU and does not require CUDA PyTorch. This environment
 covers the Rust port's helper scripts, not the upstream Blender/training stack.
 
 On a Linux laptop with both Intel graphics and an NVIDIA GPU, select the
@@ -375,7 +386,7 @@ cargo run --locked -- sample \
 
 The fixture records activations before/after token embedding, after every
 transformer block, and after the final layer. `compare-forward` automatically
-selects CUDA or WGPU; on macOS WGPU normally selects Metal. `compare-forward-metal`
+selects Metal on macOS, otherwise CUDA when available, then WGPU. `compare-forward-metal`
 and `compare-forward-wgpu` are equivalent explicit aliases, while
 `compare-forward-cpu` selects the ndarray backend for diagnostics. The full
 71-joint × 60-frame forward has been verified on Metal. If a sandboxed process

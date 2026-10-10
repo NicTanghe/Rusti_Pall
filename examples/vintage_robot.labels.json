@@ -1,0 +1,26 @@
+{
+  "right": "RightUpLeg_joint",
+  "left": "LeftUpLeg_joint",
+  "labels": {
+    "root": "Root",
+    "Hips_joint": "Hips",
+    "LeftUpLeg_joint": "Left Thigh",
+    "LeftAnkle_joint": "Left Ankle",
+    "LeftFoot_joint": "Left Foot",
+    "RightUpLeg_joint": "Right Thigh",
+    "RightAnkle_joint": "Right Ankle",
+    "RightFoot_joint": "Right Foot",
+    "Body_joint": "Spine",
+    "Neck_joint": "Neck",
+    "Head_joint": "Head",
+    "LeftAntenna_joint": "Left Antenna",
+    "LeftAntennaEnd_joint": "Left Antenna",
+    "RightAntenna_joint": "Right Antenna",
+    "RightAntennaEnd_joint": "Right Antenna",
+    "LeftArm_joint": "Left Upper Arm",
+    "LeftHand_joint": "Left Hand",
+    "RightArm_joint": "Right Upper Arm",
+    "RightHand_joint": "Right Hand",
+    "Crank_joint": "Appendage"
+  }
+}

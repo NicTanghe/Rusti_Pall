@@ -10,12 +10,15 @@ use std::{
 pub const PROBE_ARG: &str = "--internal-backend-probe";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compute {
+    /// Burn's WGPU runtime with native MSL kernels on macOS.
+    Metal,
     Cuda,
     Wgpu,
 }
 impl Compute {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Metal => "metal",
             Self::Cuda => "cuda",
             Self::Wgpu => "wgpu",
         }
@@ -27,12 +30,17 @@ pub fn selected() -> Result<Compute> {
     SELECTED
         .get_or_init(|| {
             let requested = std::env::var("RUSTI_PALL_BACKEND").unwrap_or_else(|_| "auto".into());
-            choose(&requested, cfg!(feature = "cuda"), probe_process)
-                .map(|backend| {
-                    eprintln!("Compute backend: {}", backend.name());
-                    backend
-                })
-                .map_err(|e| format!("{e:#}"))
+            choose(
+                &requested,
+                cfg!(target_os = "macos"),
+                cfg!(all(feature = "cuda", not(target_os = "macos"))),
+                probe_process,
+            )
+            .map(|backend| {
+                eprintln!("Compute backend: {}", backend.name());
+                backend
+            })
+            .map_err(|e| format!("{e:#}"))
         })
         .clone()
         .map_err(anyhow::Error::msg)
@@ -40,12 +48,18 @@ pub fn selected() -> Result<Compute> {
 
 fn choose(
     requested: &str,
+    is_macos: bool,
     cuda_compiled: bool,
     mut probe: impl FnMut(Compute) -> Result<()>,
 ) -> Result<Compute> {
     match requested.to_ascii_lowercase().as_str() {
         "auto" => {
-            if cuda_compiled {
+            if is_macos {
+                match probe(Compute::Metal) {
+                    Ok(()) => return Ok(Compute::Metal),
+                    Err(e) => eprintln!("Metal unavailable; trying WGPU: {e:#}"),
+                }
+            } else if cuda_compiled {
                 match probe(Compute::Cuda) {
                     Ok(()) => return Ok(Compute::Cuda),
                     Err(e) => eprintln!("CUDA unavailable; trying WGPU: {e:#}"),
@@ -54,10 +68,16 @@ fn choose(
             probe(Compute::Wgpu).context("WGPU also unavailable; check GPU access and drivers")?;
             Ok(Compute::Wgpu)
         }
+        "metal" => {
+            ensure!(is_macos, "Metal is only available in macOS builds");
+            probe(Compute::Metal)
+                .context("Metal was explicitly requested but its device test failed")?;
+            Ok(Compute::Metal)
+        }
         "cuda" => {
             ensure!(
-                cuda_compiled,
-                "CUDA was not compiled in; rebuild without --no-default-features"
+                cuda_compiled && !is_macos,
+                "CUDA is unavailable in this build; on non-macOS systems rebuild with --features cuda"
             );
             probe(Compute::Cuda)
                 .context("CUDA was explicitly requested but its device test failed")?;
@@ -67,7 +87,7 @@ fn choose(
             probe(Compute::Wgpu)?;
             Ok(Compute::Wgpu)
         }
-        _ => bail!("RUSTI_PALL_BACKEND must be auto, cuda, or wgpu; got {requested:?}"),
+        _ => bail!("RUSTI_PALL_BACKEND must be auto, metal, cuda, or wgpu; got {requested:?}"),
     }
 }
 
@@ -101,8 +121,10 @@ pub fn handle_probe() -> Option<ExitCode> {
         return None;
     }
     let result = match args.next().as_deref() {
-        #[cfg(feature = "cuda")]
-        Some("cuda") => device_test::<burn::backend::Cuda>(&Default::default()),
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        Some("cuda") => device_test::<burn_cuda::Cuda>(&Default::default()),
+        #[cfg(target_os = "macos")]
+        Some("metal") => device_test::<burn::backend::Wgpu>(&Default::default()),
         Some("wgpu") => device_test::<burn::backend::Wgpu>(&Default::default()),
         _ => Err(anyhow::anyhow!("Backend not compiled or unknown")),
     };
@@ -137,10 +159,63 @@ fn device_test<B: Backend>(device: &B::Device) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn macos_prefers_metal_even_when_cuda_feature_is_enabled() {
+        for cuda_compiled in [false, true] {
+            let mut calls = vec![];
+            assert_eq!(
+                choose("auto", true, cuda_compiled, |b| {
+                    calls.push(b);
+                    Ok(())
+                })
+                .unwrap(),
+                Compute::Metal
+            );
+            assert_eq!(calls, [Compute::Metal]);
+        }
+        let mut calls = vec![];
+        assert_eq!(
+            choose("auto", true, true, |b| {
+                calls.push(b);
+                if b == Compute::Metal {
+                    bail!("Metal probe failed");
+                }
+                Ok(())
+            })
+            .unwrap(),
+            Compute::Wgpu
+        );
+        assert_eq!(calls, [Compute::Metal, Compute::Wgpu]);
+        assert!(choose("auto", true, false, |_| bail!("no device")).is_err());
+    }
+
+    #[test]
+    fn explicit_metal_and_platform_overrides_are_respected() {
+        assert_eq!(
+            choose("MeTaL", true, false, |b| {
+                assert_eq!(b, Compute::Metal);
+                Ok(())
+            })
+            .unwrap(),
+            Compute::Metal
+        );
+        assert!(choose("metal", true, false, |_| bail!("no Metal device")).is_err());
+        assert!(choose("metal", false, true, |_| panic!("must not probe")).is_err());
+        assert!(choose("cuda", true, true, |_| panic!("must not probe")).is_err());
+        assert_eq!(
+            choose("wgpu", true, true, |b| {
+                assert_eq!(b, Compute::Wgpu);
+                Ok(())
+            })
+            .unwrap(),
+            Compute::Wgpu
+        );
+    }
+
+    #[test]
     fn prefers_cuda_and_falls_back_only_in_auto_mode() {
         let mut calls = vec![];
         assert_eq!(
-            choose("auto", true, |b| {
+            choose("auto", false, true, |b| {
                 calls.push(b);
                 Ok(())
             })
@@ -150,7 +225,7 @@ mod tests {
         assert_eq!(calls, vec![Compute::Cuda]);
         let mut calls = vec![];
         assert_eq!(
-            choose("auto", true, |b| {
+            choose("auto", false, true, |b| {
                 calls.push(b);
                 if b == Compute::Cuda {
                     bail!("no driver")
@@ -161,14 +236,14 @@ mod tests {
             Compute::Wgpu
         );
         assert_eq!(calls, vec![Compute::Cuda, Compute::Wgpu]);
-        assert!(choose("cuda", true, |_| bail!("no driver")).is_err());
-        assert!(choose("auto", true, |_| bail!("no device")).is_err());
+        assert!(choose("cuda", false, true, |_| bail!("no driver")).is_err());
+        assert!(choose("auto", false, true, |_| bail!("no device")).is_err());
     }
     #[test]
     fn explicit_wgpu_and_build_without_cuda_do_not_probe_cuda() {
         for (request, compiled) in [("wgpu", true), ("auto", false)] {
             assert_eq!(
-                choose(request, compiled, |b| {
+                choose(request, false, compiled, |b| {
                     assert_eq!(b, Compute::Wgpu);
                     Ok(())
                 })
@@ -176,7 +251,7 @@ mod tests {
                 Compute::Wgpu
             );
         }
-        assert!(choose("cuda", false, |_| panic!("must not probe")).is_err());
-        assert!(choose("hip", true, |_| panic!("must not probe")).is_err());
+        assert!(choose("cuda", false, false, |_| panic!("must not probe")).is_err());
+        assert!(choose("hip", false, true, |_| panic!("must not probe")).is_err());
     }
 }
