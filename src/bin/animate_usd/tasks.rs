@@ -268,7 +268,7 @@ pub fn run(a: &[String]) -> Result<()> {
     package(out, false)?;
     write_json(
         output.join("constraint-validation.json"),
-        &json!({"exact_feature_constraints":true,"seam_feature_delta_before_restore":seam_errors,"frames":chain_frames,"fps":30}),
+        &json!({"backend":rusty_pall::compute::selected()?.name(),"exact_feature_constraints":true,"seam_feature_delta_before_restore":seam_errors,"frames":chain_frames,"fps":30}),
     )?;
     eprintln!(
         "Saved {} ({chain_frames} frames at 30 fps)",

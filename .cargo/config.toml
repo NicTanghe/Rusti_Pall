@@ -1,0 +1,6 @@
+[env]
+# Bind against the CUDA 12.8 API supported by Burn 0.20/cudarc 0.18.
+# This avoids nvcc version detection rejecting newer toolkits (e.g. 13.4),
+# and allows compilation without CUDA installed. Libraries are loaded at runtime.
+# An explicitly supplied CUDARC_CUDA_VERSION still takes precedence.
+CUDARC_CUDA_VERSION = { value = "12080", force = false }

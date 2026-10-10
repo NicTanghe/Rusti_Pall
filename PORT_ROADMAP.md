@@ -6,6 +6,12 @@ The frozen UniMate graph/adaLN denoiser and flow sampler are implemented in
 Burn, with native USDZ rig preparation and animation export in `animate_usd`.
 
 - Released EMA weights load strictly into the Burn model.
+- Both CLIs prefer direct CUDA after a device test, with WGPU fallback and
+  an explicit backend override. CUDA is enabled by default; HIP is not added.
+- The full CUDA forward pass on the RTX 2070 matched the PyTorch fixture
+  with maximum absolute output error `4.53e-5` and RMSE `6.36e-6`. A CUDA
+  constrained-sampling smoke test preserved pinned features exactly and
+  produced a valid USDZ. Backend preference/fallback unit tests pass.
 - Full 71-joint × 60-frame denoiser forward comparisons passed against
   PyTorch on Metal and on an RTX 2070 using WGPU/Vulkan. RTX 2070 maximum
   absolute error was `5.25e-5`, with RMSE `6.97e-6`.

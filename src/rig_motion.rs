@@ -7,10 +7,7 @@ use crate::{
     usd_rig::{Annotation, Rig, position, rotation},
 };
 use anyhow::{Context, Result, ensure};
-use burn::{
-    backend::Wgpu,
-    tensor::{Int, Tensor, TensorData},
-};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use nalgebra::{DMatrix, Matrix3, Rotation3, UnitQuaternion, Vector3};
 use openusd::{gf, sdf, usd};
 use serde::{Deserialize, Serialize};
@@ -270,6 +267,41 @@ impl Prepared {
         scale: f32,
         replacement: Option<&crate::motion_tasks::Replacement>,
     ) -> Result<Vec<f32>> {
+        match crate::compute::selected()? {
+            #[cfg(feature = "cuda")]
+            crate::compute::Compute::Cuda => self.sample_with::<burn::backend::Cuda>(
+                cfg,
+                weights,
+                stats,
+                seed,
+                scale,
+                replacement,
+                Default::default(),
+            ),
+            #[cfg(not(feature = "cuda"))]
+            crate::compute::Compute::Cuda => anyhow::bail!("CUDA not compiled"),
+            crate::compute::Compute::Wgpu => self.sample_with::<burn::backend::Wgpu>(
+                cfg,
+                weights,
+                stats,
+                seed,
+                scale,
+                replacement,
+                Default::default(),
+            ),
+        }
+    }
+
+    fn sample_with<B: Backend>(
+        &self,
+        cfg: &UniMateConfig,
+        weights: &Path,
+        stats: &NormalizationStats,
+        seed: u64,
+        scale: f32,
+        replacement: Option<&crate::motion_tasks::Replacement>,
+        device: B::Device,
+    ) -> Result<Vec<f32>> {
         ensure!(
             scale.is_finite() && scale >= 1.,
             "CFG scale must be finite and >= 1"
@@ -305,9 +337,8 @@ impl Prepared {
                 && self.depths.len() == w,
             "Invalid topology dimensions"
         );
-        let device = burn::backend::wgpu::WgpuDevice::DiscreteGpu(0);
-        let mut model = model::UniMateDenoiser::<Wgpu>::from_config(cfg, &device)
-            .map_err(anyhow::Error::msg)?;
+        let mut model =
+            model::UniMateDenoiser::<B>::from_config(cfg, &device).map_err(anyhow::Error::msg)?;
         model
             .load_ema_weights(weights)
             .map_err(anyhow::Error::msg)?;
@@ -324,11 +355,11 @@ impl Prepared {
                 TensorData::new(self.parent_features.clone(), [1, w, 12]),
                 &device,
             ),
-            n_joints: Tensor::<Wgpu, 1, Int>::from_data(
+            n_joints: Tensor::<B, 1, Int>::from_data(
                 TensorData::new(vec![self.joints.len() as i64], [1]),
                 &device,
             ),
-            motion_lengths: Tensor::<Wgpu, 1, Int>::from_data(
+            motion_lengths: Tensor::<B, 1, Int>::from_data(
                 TensorData::new(vec![replacement.map_or(f, |r| r.valid_frames) as i64], [1]),
                 &device,
             ),
@@ -336,15 +367,15 @@ impl Prepared {
                 TensorData::new(self.joint_embeddings.clone(), [1, w, 768]),
                 &device,
             ),
-            joint_depths: Tensor::<Wgpu, 2, Int>::from_data(
+            joint_depths: Tensor::<B, 2, Int>::from_data(
                 TensorData::new(self.depths.clone(), [1, w]),
                 &device,
             ),
-            graph_dist: Tensor::<Wgpu, 3, Int>::from_data(
+            graph_dist: Tensor::<B, 3, Int>::from_data(
                 TensorData::new(self.graph_dist.clone(), [1, w, w]),
                 &device,
             ),
-            joint_relations: Tensor::<Wgpu, 3, Int>::from_data(
+            joint_relations: Tensor::<B, 3, Int>::from_data(
                 TensorData::new(self.relations.clone(), [1, w, w]),
                 &device,
             ),
@@ -353,7 +384,7 @@ impl Prepared {
                 &device,
             ),
         };
-        let noise = sampler::standard_normal_noise::<Wgpu, 4>([1, w, 12, f], seed, &device);
+        let noise = sampler::standard_normal_noise::<B, 4>([1, w, 12, f], seed, &device);
         let sample = if let Some(r) = replacement {
             r.validate(w, f)?;
             let mut known = r.known.clone();

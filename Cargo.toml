@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 default-run = "rusty_pall"
 
+[features]
+default = ["cuda"]
+cuda = ["burn/cuda"]
+
 [dependencies]
 burn = { version = "0.20.1", default-features = false, features = ["std", "ndarray", "wgpu"] }
 burn-store = { version = "0.20.1", default-features = false, features = ["std", "pytorch"] }

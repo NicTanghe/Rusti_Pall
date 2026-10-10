@@ -119,10 +119,7 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
         write_json(&path, &prepared)?;
     }
     let start = std::time::Instant::now();
-    eprintln!(
-        "Sampling {} frames on discrete WGPU adapter 0...",
-        prepared.frames
-    );
+    eprintln!("Sampling {} frames...", prepared.frames);
     let values = prepared.sample(
         &config()?,
         &model_dir().join("ema_named.pt"),
@@ -138,7 +135,7 @@ fn sample(out: &str, seed: u64, cfg: f32) -> Result<()> {
     package(out, false)?;
     write_json(
         output.join("run.json"),
-        &serde_json::json!({"seed":seed,"cfg":cfg,"sampling_export_seconds":start.elapsed().as_secs_f64(),"prompt":prepared.prompt}),
+        &serde_json::json!({"seed":seed,"cfg":cfg,"backend":rusty_pall::compute::selected()?.name(),"sampling_export_seconds":start.elapsed().as_secs_f64(),"prompt":prepared.prompt}),
     )?;
     eprintln!(
         "Saved {} ({:.1}s)",
@@ -275,6 +272,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     match a.first().map(String::as_str) {
+        Some("backend") if a.len() == 1 => println!("{}", rusty_pall::compute::selected()?.name()),
         Some("inbetween" | "edit" | "expand") => tasks::run(&a)?,
         Some("inspect") if a.len() == 2 => {
             let rig = Rig::open(Path::new(&a[1]))?;
@@ -295,12 +293,15 @@ fn run() -> Result<()> {
             a.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3.),
         )?,
         _ => anyhow::bail!(
-            "Usage:\n  animate_usd inspect <rig.usdz>\n  animate_usd fetch-text\n  animate_usd package <output-dir>\n  animate_usd reexport <output-dir>\n  animate_usd prepare <rig.usdz> <labels.json> <new-output-dir> <prompt>\n  animate_usd sample <output-dir> [seed=10] [cfg=3]\n  animate_usd run <rig.usdz> <labels.json> <new-output-dir> <prompt>\nModel paths can be overridden with RUSTI_PALL_MODEL_DIR and RUSTI_PALL_TEXT_DIR."
+            "Usage:\n  animate_usd backend\n  animate_usd inspect <rig.usdz>\n  animate_usd fetch-text\n  animate_usd package <output-dir>\n  animate_usd reexport <output-dir>\n  animate_usd prepare <rig.usdz> <labels.json> <new-output-dir> <prompt>\n  animate_usd sample <output-dir> [seed=10] [cfg=3]\n  animate_usd run <rig.usdz> <labels.json> <new-output-dir> <prompt>\nSet RUSTI_PALL_BACKEND=auto|cuda|wgpu to select compute. Model paths can be overridden with RUSTI_PALL_MODEL_DIR and RUSTI_PALL_TEXT_DIR."
         ),
     }
     Ok(())
 }
 fn main() -> std::process::ExitCode {
+    if let Some(code) = rusty_pall::compute::handle_probe() {
+        return code;
+    }
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

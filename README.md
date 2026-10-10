@@ -12,9 +12,9 @@ real-rig validation work.
 
 - The native `animate_usd` runner takes a USDZ rig, semantic joint labels and
   a prompt through Rust text encoding, inference and USD animation export.
-- Burn 0.20.1 is pinned for the ndarray CPU and WGPU (Metal on macOS) backends.
+- Burn 0.20.1 is pinned for the CUDA, ndarray CPU and WGPU backends.
 - The CLI parses and validates a resolved UniMate JSON config.
-- `sample` runs seeded flow inference on WGPU (Metal on macOS) and writes
+- `sample` runs seeded flow inference on CUDA or WGPU and writes
   normalized float32 NumPy motion output.
 - Flow sampling supports adaptive Dormand-Prince 5(4) integration with the
   upstream `atol=1e-6`, `rtol=1e-3`, 50 requested points, and sequential CFG.
@@ -50,7 +50,7 @@ real-rig validation work.
 ### Native Rust rig animation
 
 `animate_usd` reads USDZ with `mxpv/openusd`, builds rig conditioning, encodes
-the prompt and joint labels with Candle FLAN-T5, samples with Burn/WGPU, and
+the prompt and joint labels with Candle FLAN-T5, samples with Burn, and
 writes USD animation. The runtime does not invoke Python or Blender. It uses
 the converted EMA checkpoint from the initial setup described below.
 
@@ -66,8 +66,56 @@ target/release/animate_usd run \
 
 Choose a new output directory for each run. `fetch-text` downloads the pinned
 FLAN-T5 assets once (approximately 1 GB). `RUSTI_PALL_MODEL_DIR` and
-`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling selects discrete
-WGPU adapter 0, which must be accessible to the process.
+`RUSTI_PALL_TEXT_DIR` override the model directories. Sampling prefers CUDA
+device 0 when its device test succeeds, otherwise it uses WGPU.
+
+### GPU backend selection
+
+CUDA support is included in default builds. Both CLIs automatically test CUDA
+first, then WGPU. The test performs a small GPU calculation and readback in a
+separate process, so missing CUDA libraries or driver initialization failures
+can trigger fallback without crashing the inference process. Selection is
+cached for the invocation, including multi-segment expansion. Text encoding
+still runs on the CPU.
+
+```sh
+cd /home/dude/dev/Rusti_Pall
+cargo build --release --locked --bins
+./target/release/animate_usd backend
+
+# Overrides work in bash and fish; apply to any inference command.
+env RUSTI_PALL_BACKEND=cuda ./target/release/animate_usd backend
+env RUSTI_PALL_BACKEND=wgpu ./target/release/animate_usd backend
+```
+
+`RUSTI_PALL_BACKEND=auto` is the default. Explicit `cuda` fails if CUDA cannot
+run, instead of silently selecting another backend. WGPU uses its default
+high-power device selection; `CUBECL_WGPU_DEFAULT_DEVICE=DiscreteGpu(0)` can
+override it. Explicit `compare-forward-wgpu` and `compare-forward-metal`
+commands retain their WGPU behavior. Once inference starts, errors are
+reported; a failed inference is not automatically retried on another backend.
+
+The CUDA path needs an NVIDIA driver, device access, and CUDA's NVRTC runtime
+and headers (the toolkit). CubeCL detects `/opt/cuda` and `/usr/local/cuda`;
+use `CUDA_PATH` for another toolkit location, and ensure its libraries are
+available to the dynamic loader. `.cargo/config.toml` selects the CUDA 12.8
+API bindings understood by the pinned cudarc version, avoiding its rejection
+of newer toolkit version strings such as 13.4. It does not install or replace
+the toolkit; an explicit `CUDARC_CUDA_VERSION` overrides that build setting.
+CUDA libraries are loaded at runtime. For a build that omits CUDA entirely,
+use `cargo build --release --locked --no-default-features --bins`.
+
+Validated on the RTX 2070 with the installed CUDA 13.4 toolkit: automatic CUDA
+selection, explicit WGPU selection, and automatic WGPU fallback with an
+unavailable CUDA toolkit path. The full 71-joint × 60-frame CUDA forward pass
+matched the saved PyTorch reference with maximum absolute output error
+`4.53e-5` and RMSE `6.36e-6`. A two-step CUDA in-betweening smoke test produced
+60 finite frames, preserved the pinned features exactly, and exported a USDZ
+readable by the reference USD parser and Blender (63 bones and an animation
+action). This is correctness validation, not a
+CUDA-versus-WGPU speed benchmark.
+
+### Native animation output
 
 The output contains `animation.usdz` with the original mesh and texture,
 `package/animation.usda`, the raw motion tensor in `motion.json`, saved
@@ -228,7 +276,7 @@ The Python import is `unimate`. Its pinned source already lives in
 `reference/UniMate`; setup registers that directory in this virtual environment
 without copying it or modifying the system Python installation. On Linux,
 setup installs CPU PyTorch for conversion and reference fixtures. Rust GPU
-inference uses WGPU/Vulkan and does not require CUDA PyTorch. This environment
+inference uses native CUDA or WGPU and does not require CUDA PyTorch. This environment
 covers the Rust port's helper scripts, not the upstream Blender/training stack.
 
 On a Linux laptop with both Intel graphics and an NVIDIA GPU, select the
@@ -236,6 +284,7 @@ discrete GPU explicitly before running inference:
 
 ```sh
 export CUBECL_WGPU_DEFAULT_DEVICE='DiscreteGpu(0)'
+export RUSTI_PALL_BACKEND=wgpu
 .venv/bin/python scripts/make_reference_fixture.py --joints 8 --frames 4
 target/debug/rusty_pall compare-forward \
   weights/unimate_uniml3d_f60_v3/forward_fixture.config.json \
@@ -325,15 +374,15 @@ cargo run --locked -- sample \
 ```
 
 The fixture records activations before/after token embedding, after every
-transformer block, and after the final layer. `compare-forward` uses Burn WGPU
-by default; on macOS, Burn selects its Metal adapter. `compare-forward-metal`
+transformer block, and after the final layer. `compare-forward` automatically
+selects CUDA or WGPU; on macOS WGPU normally selects Metal. `compare-forward-metal`
 and `compare-forward-wgpu` are equivalent explicit aliases, while
 `compare-forward-cpu` selects the ndarray backend for diagnostics. The full
 71-joint × 60-frame forward has been verified on Metal. If a sandboxed process
 cannot see the adapter, run the command from a normal macOS Terminal session
 with GPU access.
 
-`sample` runs the full Burn flow sampler on WGPU (Metal on macOS), creates
+`sample` runs the full Burn flow sampler on the selected backend, creates
 seeded initial Gaussian noise, and writes feature values as a float32 NumPy
 array with shape `[batch, joints, features, frames]`. Pass both `stats.json`
 and a dataset type (`truebones`, `mixamo`, or `objaverse`) to inverse-normalize

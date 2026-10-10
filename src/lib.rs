@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod compute;
 pub mod model;
 pub mod motion_tasks;
 pub mod normalization;
